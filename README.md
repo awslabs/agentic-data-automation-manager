@@ -1,4 +1,4 @@
-# One MCP server. Two tools. All your connected data served securely
+# One MCP server. Two tools. All your connected data served securely.
 
 One MCP service, behind Amazon Bedrock AgentCore Gateway, that lets an agent search the schemas of every data source a user has connected and run statements against them as that user. The sample includes providers for Oracle (including Oracle Database@AWS), PostgreSQL and MySQL (Aurora or RDS), MariaDB, and Amazon Redshift. The sample documents Amazon Quick as the MCP client. API tools are also supported: ingest the schemas of your desired APIs and your users' agents can work with them, securely using the users' credentials (agents never see credentials or manage connections).
 
