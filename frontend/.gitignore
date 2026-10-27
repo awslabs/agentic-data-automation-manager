@@ -1,0 +1,15 @@
+*.swp
+__pycache__
+.pytest_cache
+.venv
+*.egg-info
+
+# CDK asset staging directory
+.cdk.staging
+cdk.out
+
+# Frontend build artifacts
+src/adam_ui/node_modules
+src/adam_ui/dist
+src/adam_ui/src/aws-exports.ts
+backend_outputs.json

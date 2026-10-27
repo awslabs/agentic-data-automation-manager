@@ -1,0 +1,68 @@
+# Local services for integration tests (backend/src/tests/integration).
+#
+#   docker compose -f docker-compose.test.yml up -d --wait
+#   cd backend/src && python3 -m pytest -m integration
+#
+# Host ports are deliberately offset from the engines' defaults so these never
+# collide with a database already running on the developer's machine, and bound
+# to 127.0.0.1 so nothing else on the network can reach them. No password is
+# written here: each database reads its admin password from .env.test (git-ignored;
+# the README shows how to generate it), and so do the fixtures in
+# tests/integration/conftest.py. Without the file, compose refuses to start.
+services:
+  oracle:
+    image: gvenzl/oracle-free:23-slim-faststart
+    env_file: .env.test
+    ports:
+      - "127.0.0.1:51521:1521"
+    healthcheck:
+      test: ["CMD", "healthcheck.sh"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+
+  postgres:
+    image: postgres:18-alpine
+    env_file: .env.test
+    ports:
+      - "127.0.0.1:55432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  mysql:
+    image: mysql:8.4
+    env_file: .env.test
+    ports:
+      - "127.0.0.1:53306:3306"
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p$$MYSQL_ROOT_PASSWORD"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  mariadb:
+    image: mariadb:11.8
+    env_file: .env.test
+    ports:
+      - "127.0.0.1:53307:3306"
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  dynamodb-local:
+    image: amazon/dynamodb-local:2.5.4
+    ports:
+      - "127.0.0.1:58000:8000"
+    command: ["-jar", "DynamoDBLocal.jar", "-inMemory"]
+
+  # Secrets Manager, SSM, STS and Lambda invoke. Glue table CRUD works too, but
+  # moto has no UpdateAsset / SearchAssets, so those stay thin fakes in tests.
+  moto:
+    image: motoserver/moto:5.1.10
+    ports:
+      - "127.0.0.1:55000:5000"

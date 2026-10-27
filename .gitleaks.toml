@@ -1,0 +1,12 @@
+[extend]
+# Start from gitleaks' built-in rules; without this the config has no rules.
+useDefault = true
+
+[allowlist]
+paths = [
+    '''node_modules''',
+    '''cdk\.out''',
+    '''\.venv''',
+    '''__pycache__''',
+    '''(^|/)\.git/''',
+]

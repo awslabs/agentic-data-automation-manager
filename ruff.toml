@@ -1,0 +1,16 @@
+line-length = 120
+target-version = "py311"
+extend-exclude = ["cdk.out", "node_modules"]
+
+[lint]
+select = ["E", "F", "W", "I", "UP", "S", "BLE", "C4"]
+
+[lint.isort]
+combine-as-imports = true
+known-first-party = ["agent_provider", "adam", "cdk_infra", "demo_dataset", "schema_provider", "shared"]
+
+[lint.per-file-ignores]
+# Tests assert, use fixed test passwords, and run the cdk CLI.
+# S608: tests build SQL from their own fixture table names to drive the statement tools.
+"backend/src/tests/**" = ["S101", "S105", "S106", "S107", "S603", "S607", "S608"]
+"frontend/tests/**" = ["S101", "S105", "S106", "S107", "S603", "S607", "S608"]

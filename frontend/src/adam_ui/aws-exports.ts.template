@@ -1,0 +1,23 @@
+export interface AWSConfig {
+  region: string;
+  userPoolId: string;
+  userPoolClientId: string;
+  cognitoDomain: string;
+  gatewayScope: string;
+  httpApiUrl: string;
+  eventsHttpEndpoint: string;
+  agentRuntimeArn: string;
+}
+
+const awsConfig: AWSConfig = {
+  region: "<REGION>",
+  userPoolId: "<USER_POOL_ID>",
+  userPoolClientId: "<USER_POOL_CLIENT_ID>",
+  cognitoDomain: "<COGNITO_DOMAIN>",
+  gatewayScope: "<GATEWAY_SCOPE>",
+  httpApiUrl: "<HTTP_API_URL>",
+  eventsHttpEndpoint: "<EVENTS_API_ENDPOINT>",
+  agentRuntimeArn: "<RUNTIME_ARN>",
+};
+
+export default awsConfig;

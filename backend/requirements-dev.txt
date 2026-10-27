@@ -1,0 +1,16 @@
+pytest==9.1.1
+# The handlers under test import these at module import time, so the unit
+# tests cannot even collect without them. They are test-only: each Lambda
+# bundles its own copy at synth time, at these same versions
+# (cdk_infra/shared/bundling.py and data_source_engines.py).
+boto3==1.43.103
+pyjwt[crypto]==2.15.0
+cryptography==50.0.1
+oracledb==26.0.1
+pg8000==1.31.5
+scramp==1.4.17
+PyMySQL==1.2.3
+redshift_connector==2.2.0
+# The agent runtime's own packages, for the tests that import agent.py; the
+# image installs the same file.
+-r src/adam/agent_provider/agent_runtime/requirements.txt

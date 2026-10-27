@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "adam"
+version = "0.1.0"
+description = "One MCP service for schema search and SQL across connected databases, behind Amazon Bedrock AgentCore Gateway"
+requires-python = ">=3.11"
+# No dependencies here: each Lambda bundle and the agent image install exactly their own
+# (cdk_infra/shared/bundling.py, agent_runtime/requirements.txt); tests use
+# backend/requirements-dev.txt.
+dependencies = []
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["adam*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v -m 'not integration and not deployed'"
+markers = [
+    "integration: needs the local services in docker-compose.test.yml (run with -m integration)",
+    "deployed: needs a deployed stage named by TEST_DEPLOYED_PREFIX (run with -m deployed)",
+]

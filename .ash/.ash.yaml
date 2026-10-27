@@ -1,0 +1,72 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/awslabs/automated-security-helper/refs/heads/main/automated_security_helper/schemas/AshConfig.json
+# Automated Security Helper: SAST, IaC, secrets, and dependency scanning.
+# Every scanner runs with its defaults; see the schema above for options.
+project_name: agentic-data-automation-manager
+fail_on_findings: true
+global_settings:
+  severity_threshold: MEDIUM
+  ignore_paths:
+    - path: '**/node_modules/**'
+      reason: Third-party packages; scanned through the lockfile instead
+    - path: '**/cdk.out*/asset.*/**'
+      reason: Bundled function code and its packages, copied from sources scanned in place; the synthesized templates beside them are scanned
+    - path: '**/dist/**'
+      reason: Build output of the UI sources, which are scanned
+    - path: '.venv/**'
+      reason: Local virtual environment
+    - path: '**/.ruff_cache/**'
+      reason: Tool cache
+    - path: '**/.pytest_cache/**'
+      reason: Tool cache
+    - path: 'frontend/backend_outputs*.json'
+      reason: Git-ignored stack outputs written by install_cdk.sh; resource names and URLs only
+    # Git-ignored directories, never published. ASH's own file list honors
+    # .gitignore, but bandit walks the tree and takes only these excludes.
+    - path: '.claude/worktrees/**'
+      reason: Git-ignored ephemeral agent worktrees; copies of the scanned sources
+    - path: '**/.cdk.staging/**'
+      reason: Git-ignored CDK asset staging
+    - path: '.ash/ash_output*/**'
+      reason: Git-ignored ASH reports
+    - path: 'logs/**'
+      reason: Git-ignored install_cdk.sh run logs
+    - path: 'backups/**'
+      reason: Git-ignored local exports of the demo databases
+    - path: 'oradata/**'
+      reason: Git-ignored Oracle container volume
+    - path: '**/__pycache__/**'
+      reason: Git-ignored bytecode
+    - path: '**/*.egg-info/**'
+      reason: Git-ignored packaging metadata
+    - path: '**/build/**'
+      reason: Git-ignored build output
+    - path: 'venv/**'
+      reason: Git-ignored local virtual environment
+    - path: '.idea/**'
+      reason: Git-ignored editor settings
+    - path: '.vscode/**'
+      reason: Git-ignored editor settings
+  # Secrets in source take an inline `pragma: allowlist secret` instead, so the
+  # exemption moves with the line.
+  suppressions:
+    - rule_id: SECRET-SECRET-KEYWORD
+      path: 'backend/src/tests/**'
+      reason: Fake credentials, secret ARNs and deliberately wrong passwords in tests; real test passwords come from the git-ignored .env.test
+    - rule_id: B608
+      path: 'backend/src/tests/**'
+      reason: Tests build SQL from their own fixture table names to drive the statement tools under test (ruff.toml exempts S608 there for the same reason)
+    - rule_id: B101
+      path: 'backend/src/tests/**'
+      reason: pytest's assert is how tests check results; no product code uses assert
+    - rule_id: B101
+      path: 'frontend/tests/**'
+      reason: pytest's assert is how tests check results; no product code uses assert
+    - rule_id: CKV_AWS_115
+      path: '**'
+      reason: No function reserves concurrency; a reservation takes capacity from the account's pool and throttles at its cap. The chat route, the one that starts model work, is rate limited at the HTTP API stage.
+    - rule_id: CFN_NAG_W92
+      path: '**'
+      reason: cfn-nag's reserved-concurrency rule, the same as CKV_AWS_115 above and suppressed for the same reason.
+    - rule_id: CKV_DOCKER_2
+      path: backend/src/adam/agent_provider/agent_runtime/Dockerfile
+      reason: AgentCore Runtime checks health through the agent's /ping route, not a container HEALTHCHECK

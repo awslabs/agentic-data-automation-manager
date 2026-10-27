@@ -1,0 +1,31 @@
+# Install once: pre-commit install --hook-type pre-commit --hook-type pre-push
+# Lint runs on commit. ASH takes minutes, so it runs on push.
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: check-merge-conflict
+      - id: check-added-large-files
+      - id: detect-private-key
+      - id: check-yaml
+        args: [--unsafe]  # CloudFormation-style tags
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.17.0
+    hooks:
+      - id: ruff-check
+
+  - repo: local
+    hooks:
+      - id: eslint
+        name: eslint (UI)
+        entry: npm --prefix frontend/src/adam_ui run lint
+        language: system
+        files: ^frontend/src/adam_ui/.*\.(ts|tsx|js|jsx)$
+        pass_filenames: false
+
+  - repo: https://github.com/awslabs/automated-security-helper
+    rev: v3.7.1
+    hooks:
+      - id: ash-simple-scan
+        stages: [pre-push]
