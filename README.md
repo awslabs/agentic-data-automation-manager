@@ -191,27 +191,27 @@ Without it, `/api/chat` answers that chat is not enabled, and the website has no
 
 ## Services and cost
 
-| Service | Used for | Cost driver |
-|---|---|---|
-| Amazon VPC interface endpoints | One per service in `vpc_endpoints_stack.py` the VPC doesn't already have, in each subnet's zone | Fixed: hourly per endpoint per zone, plus data processed. The largest fixed cost. |
-| AWS Secrets Manager | User and scanner logins | Per secret per month, plus API calls |
-| Amazon Bedrock AgentCore Gateway | MCP endpoint | Per tool call |
-| Amazon Bedrock AgentCore Runtime | Agent for the web console's chat (on by default; `ENABLE_CHAT=false` leaves it out) | Usage-based; see the pricing page |
-| Amazon ECR | The chat agent's container image, in the CDK bootstrap repository | Storage |
-| AWS AppSync Events | Streams chat replies to the website | Per operation and per connection minute |
-| AWS Lambda | All functions | Per request and duration |
-| Amazon DynamoDB (on-demand) | Connections, scan targets, and registered providers | Per request and storage |
-| AWS Glue Data Catalog | Schema index and semantic search | Objects stored and requests |
-| Amazon Bedrock | The chat models, and `web_search` (Amazon Nova 2 Lite with web grounding) when turned on | Per token; see the pricing page for web grounding |
-| Amazon Cognito | Users | Monthly active users |
-| Amazon API Gateway | Websites' API | Per request |
-| Amazon S3 and Amazon CloudFront | Websites, and scan results (kept 7 days) | Storage and transfer |
-| Amazon EventBridge | Scan requests and results (a custom bus); scheduled scans (Scheduler) | Per event; per invocation |
-| Amazon CloudWatch Logs | Logs of every function and the gateway (kept a month, or a year in `prod`), and of the agent runtime, under `/aws/bedrock-agentcore/runtimes/` | Ingestion and storage |
-| AWS X-Ray | The chat agent's traces | Per trace recorded and retrieved |
-| Amazon Redshift Serverless (optional) | `REDSHIFT_TEST_TARGET=true`: a 4 RPU workgroup for the Redshift provider's tests | Compute while queries run, and storage |
+Prices are on-demand rates for us-east-1, from the AWS Price List API on 2026-11-02, before free tiers. Rates differ by Region and change; check each service's pricing page.
 
-See each service's pricing page for current rates in your Region.
+| Service | Used for | Price (us-east-1) |
+|---|---|---|
+| Amazon VPC interface endpoints | One per service in `vpc_endpoints_stack.py` the VPC doesn't already have, in each subnet's zone | $0.01 per endpoint per zone per hour, plus $0.01 per GB processed. The largest fixed cost: all 13 endpoints (10, plus 3 for chat) in two zones is about $190 a month; without chat, about $146. |
+| AWS Secrets Manager | User and scanner logins | $0.40 per secret per month, plus $0.05 per 10,000 API calls |
+| Amazon Bedrock AgentCore Gateway | MCP endpoint | $0.005 per 1,000 tool calls |
+| Amazon Bedrock AgentCore Runtime | Agent for the web console's chat (on by default; `ENABLE_CHAT=false` leaves it out) | $0.0895 per vCPU-hour and $0.00945 per GB-hour, while a session runs |
+| Amazon ECR | The chat agent's container image, in the CDK bootstrap repository | $0.10 per GB-month |
+| AWS AppSync Events | Streams chat replies to the website | $1.00 per million operations, plus $0.08 per million connection minutes |
+| AWS Lambda (Arm) | All functions | $0.20 per million requests, plus $0.0000133334 per GB-second |
+| Amazon DynamoDB (on-demand) | Connections, scan targets, and registered providers | $0.125 per million reads, $0.625 per million writes, $0.25 per GB-month beyond the first 25 GB |
+| AWS Glue Data Catalog | Schema index and semantic search | $1.00 per 100,000 objects per month, plus $1.00 per million requests |
+| Amazon Bedrock | The chat models, and `web_search` (Amazon Nova 2 Lite with web grounding) when turned on | Each model's per-token rate. Nova 2 Lite: $0.33 per million input tokens, $2.75 per million output tokens, plus $0.03 per web grounding request |
+| Amazon Cognito (Essentials) | Users | $0.015 per monthly active user |
+| Amazon API Gateway (HTTP API) | Websites' API | $1.00 per million requests |
+| Amazon S3 and Amazon CloudFront | Websites, and scan results (kept 7 days) | S3: $0.023 per GB-month, $0.005 per 1,000 PUT/LIST, $0.0004 per 1,000 GET. CloudFront: $0.085 per GB out to US viewers |
+| Amazon EventBridge | Scan requests and results (a custom bus); scheduled scans (Scheduler) | $1.00 per million custom events; Scheduler $1.00 per million invocations beyond 14 million a month |
+| Amazon CloudWatch Logs | Logs of every function and the gateway (kept a month, or a year in `prod`), and of the agent runtime, under `/aws/bedrock-agentcore/runtimes/` | $0.50 per GB ingested, $0.03 per GB-month stored |
+| AWS X-Ray | The chat agent's traces | $5.00 per million traces recorded, $0.50 per million retrieved |
+| Amazon Redshift Serverless (optional) | `REDSHIFT_TEST_TARGET=true`: a 4 RPU workgroup for the Redshift provider's tests | $0.375 per RPU-hour while queries run ($1.50 an hour at 4 RPU), plus $0.024 per GB-month stored |
 
 ## Remove a deployment
 
