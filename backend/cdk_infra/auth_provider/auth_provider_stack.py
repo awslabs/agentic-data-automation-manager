@@ -9,7 +9,12 @@ Independent stack. Deploys:
   - Pre token generation trigger Lambda (puts the user's email in their access token)
   - Gateway resource server + Quick MCP client
   - The admin group
+  - Any identity providers kept beside it as *_identity_provider.py modules
 """
+
+import importlib
+from pathlib import Path
+from types import ModuleType
 
 from aws_cdk import (
     CfnOutput,
@@ -29,6 +34,31 @@ from cdk_infra.shared.stage import SYNCHRONOUS, Stage
 # Quick support is limited.
 QUICK_CONSOLE_REGIONS = ("us-east-1", "us-east-2", "us-west-2")
 
+IDENTITY_PROVIDER_MODULES = "*_identity_provider.py"
+
+
+def identity_provider_modules(folder: Path = Path(__file__).parent,
+                              package: str = __package__) -> list[ModuleType]:
+    """The identity provider modules in this folder. Each adds a sign-in provider to the
+    pool and its clients with add_to(stack); one deployment can carry a provider that
+    this stack does not import by name, so its file can stay out of a published tree."""
+    return [importlib.import_module(f"{package}.{path.stem}")
+            for path in sorted(folder.glob(IDENTITY_PROVIDER_MODULES))]
+
+
+# Cognito's limit on a domain prefix.
+DOMAIN_PREFIX_MAX = 63
+
+
+def cognito_domain_prefix(parent_stack_name: str, account: str) -> str:
+    """The stack name and the account: the same stack name in two accounts never collides,
+    and a redeploy keeps the same domain."""
+    # An account ID is 12 digits, also when `account` is still a token at synth time.
+    if len(parent_stack_name) + 1 + 12 > DOMAIN_PREFIX_MAX:
+        raise ValueError(f"Stack name {parent_stack_name!r} is too long for a Cognito domain prefix: "
+                         f"with '-' and the 12-digit account it must fit in {DOMAIN_PREFIX_MAX} characters.")
+    return f"{parent_stack_name.lower()}-{account}"
+
 
 class AuthProviderStack(Stack):
 
@@ -40,6 +70,8 @@ class AuthProviderStack(Stack):
         **kwargs,
     ) -> None:
         super().__init__(scope, construct_id, **kwargs)
+        # For the identity provider modules, which build their functions as this stack does.
+        self.stage = stage
 
         # ── Cognito ──────────────────────────────────────────────────────
         invitation_fn = stage.python_function(self, "InvitationMessageTrigger",
@@ -94,7 +126,7 @@ class AuthProviderStack(Stack):
 
         self.user_pool_domain = self.user_pool.add_domain("CognitoDomain",
             cognito_domain=cognito.CognitoDomainOptions(
-                domain_prefix=parent_stack_name.lower(),
+                domain_prefix=cognito_domain_prefix(parent_stack_name, self.account),
             ),
         )
 
@@ -178,6 +210,10 @@ class AuthProviderStack(Stack):
             group_name="admin",
             description="Registers database connections and runs schema scans",
         )
+
+        # ── Identity providers beside this stack, each off unless its context turns it on ──
+        for module in identity_provider_modules():
+            module.add_to(self)
 
         # ── Outputs ─────────────────────────────────────────────────────
         CfnOutput(self, "UserPoolId", value=self.user_pool.user_pool_id)
