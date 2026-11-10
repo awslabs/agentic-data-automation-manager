@@ -23,8 +23,8 @@ SOURCE_EXCLUDES = ["tests", "**/__pycache__", "*.pyc"]
 # Exact versions, so every deploy builds the same function. The Lambda runtime's own boto3
 # predates Converse systemTool (Nova web grounding) and the Glue asset APIs, so those
 # functions bring their own.
-BOTO3 = "boto3==1.43.103"
-PYJWT = ("pyjwt[crypto]==2.15.0", "cryptography==50.0.1")
+BOTO3 = "boto3==1.43.127"
+PYJWT = ("pyjwt[crypto]==2.15.1", "cryptography==50.0.2")
 
 _DATABASE_PROVIDER = [
     "__init__.py",

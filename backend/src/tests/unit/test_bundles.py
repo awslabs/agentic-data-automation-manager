@@ -45,7 +45,7 @@ POSTGRES_PROVIDER = _PROVIDER_COMMON | {DB + "postgresql_provider.py", DB + "tls
 MYSQL_FILES = {DB + "mysql_provider.py", DB + "tls.py", CA_BUNDLE}
 MARIADB_FILES = MYSQL_FILES | {DB + "mariadb_provider.py"}
 REDSHIFT_FILES = {DB + "redshift_provider.py"}
-REDSHIFT_PIP = {"redshift_connector==2.2.0", "scramp==1.4.17", "packaging==26.3", "boto3==1.43.103"}
+REDSHIFT_PIP = {"redshift_connector==2.2.0", "scramp==1.4.17", "packaging==26.3", "boto3==1.43.127"}
 
 # A scanner: its engine and the plain credential provider (a scan has no user), and
 # nothing of the connection registry, the user-scoped secret reader or the other engine.
@@ -62,7 +62,7 @@ EXPECTED = {
     "T-Auth/InvitationMessageTrigger": (set(), {"invitation_message_trigger.py"}),
     "T-Auth/AccessTokenClaimsTrigger": (set(), {"access_token_claims_trigger.py"}),
     "T-Agent/SessionsStreamProcessor": (set(), {"sessions_stream_handler.py"}),
-    "T-Agent/InterceptorFunction": ({"pyjwt[crypto]==2.15.0", "cryptography==50.0.1"}, {
+    "T-Agent/InterceptorFunction": ({"pyjwt[crypto]==2.15.1", "cryptography==50.0.2"}, {
         "interceptor_handler.py",
         "agent_provider/__init__.py", "agent_provider/gateway_event.py", "agent_provider/identity_provider.py",
         "agent_provider/cognito_identity_provider.py", "shared/__init__.py", "shared/environment.py",
@@ -74,17 +74,17 @@ EXPECTED = {
         "shared/statement_limits.py",
     }),
     # Nova web grounding needs a newer boto3 than the runtime's.
-    "T-Agent/WebSearchFunction": ({"boto3==1.43.103"}, {
+    "T-Agent/WebSearchFunction": ({"boto3==1.43.127"}, {
         "web_search_handler.py", "agent_provider/__init__.py", "agent_provider/gateway_event.py",
         "shared/__init__.py", "shared/environment.py",
     }),
     "T-Agent/ApiFunction": (set(), {
         "api_handler.py", "chat.py", "conversations.py", "shared/__init__.py", "shared/http_response.py",
     }),
-    "T-External/OracleProviderFunction": ({"oracledb==26.0.1"}, ORACLE_PROVIDER),
+    "T-External/OracleProviderFunction": ({"oracledb==26.1.0"}, ORACLE_PROVIDER),
     "T-External/PostgreSQLProviderFunction": ({"pg8000==1.31.5", "scramp==1.4.17"}, POSTGRES_PROVIDER),
-    "T-External/MySQLProviderFunction": ({"PyMySQL==1.2.3"}, _PROVIDER_COMMON | MYSQL_FILES),
-    "T-External/MariaDBProviderFunction": ({"PyMySQL==1.2.3"}, _PROVIDER_COMMON | MARIADB_FILES),
+    "T-External/MySQLProviderFunction": ({"PyMySQL==1.2.4"}, _PROVIDER_COMMON | MYSQL_FILES),
+    "T-External/MariaDBProviderFunction": ({"PyMySQL==1.2.4"}, _PROVIDER_COMMON | MARIADB_FILES),
     "T-External/RedshiftProviderFunction": (REDSHIFT_PIP, _PROVIDER_COMMON | REDSHIFT_FILES),
     "T-External/ConnectionsApiFunction": (set(), {
         "adam/__init__.py",
@@ -98,12 +98,12 @@ EXPECTED = {
         DB + "__init__.py", DB + "connection_registry.py", DB + "engines.py", DB + "registry_handler.py",
         SH + "__init__.py", SH + "environment.py", SH + "provider_client.py",
     }),
-    "T-External/OracleScannerFunction": ({"oracledb==26.0.1"}, _SCANNER_COMMON | {
+    "T-External/OracleScannerFunction": ({"oracledb==26.1.0"}, _SCANNER_COMMON | {
         DB + "oracle_provider.py", DB + "tls.py", CA_BUNDLE}),
     "T-External/PostgresScannerFunction": ({"pg8000==1.31.5", "scramp==1.4.17"}, _SCANNER_COMMON | {
         DB + "postgresql_provider.py", DB + "tls.py", CA_BUNDLE}),
-    "T-External/MySQLScannerFunction": ({"PyMySQL==1.2.3"}, _SCANNER_COMMON | MYSQL_FILES),
-    "T-External/MariaDBScannerFunction": ({"PyMySQL==1.2.3"}, _SCANNER_COMMON | MARIADB_FILES),
+    "T-External/MySQLScannerFunction": ({"PyMySQL==1.2.4"}, _SCANNER_COMMON | MYSQL_FILES),
+    "T-External/MariaDBScannerFunction": ({"PyMySQL==1.2.4"}, _SCANNER_COMMON | MARIADB_FILES),
     "T-External/RedshiftScannerFunction": (REDSHIFT_PIP, _SCANNER_COMMON | REDSHIFT_FILES),
     # Deletes the saved logins of users the pool no longer has.
     "T-External/DeletedUsersFunction": (set(), {
@@ -120,13 +120,13 @@ EXPECTED = {
         SH + "__init__.py", SH + "scan_events.py",
     }),
     # Reads the index and the registered databases; carries no writer, no drivers, no credentials.
-    "T-Glue/GlueCatalogProviderFunction": ({"boto3==1.43.103"}, {
+    "T-Glue/GlueCatalogProviderFunction": ({"boto3==1.43.127"}, {
         "adam/__init__.py",
         SP + "__init__.py", SP + "schema_provider.py", SP + "glue_data_catalog_schema_provider.py",
         SP + "scan_targets.py", SH + "__init__.py", SH + "environment.py", SH + "schema_types.py",
     }),
     # Requests scans and indexes the providers' results: no driver, no provider code, no credential.
-    "T-Glue/SchemaIngestionFunction": ({"boto3==1.43.103"}, {
+    "T-Glue/SchemaIngestionFunction": ({"boto3==1.43.127"}, {
         "adam/__init__.py",
         SP + "__init__.py", SP + "schema_provider.py", SP + "glue_data_catalog_schema_provider.py",
         SP + "schema_ingestion_handler.py", SP + "scan_targets.py", SP + "scan_providers.py",
