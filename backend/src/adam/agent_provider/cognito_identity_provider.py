@@ -36,7 +36,24 @@ class CognitoIdentityProvider(IdentityProvider):
             raise  # the issuer's keys could not be fetched: an outage, not a refusal
         except jwt.PyJWTError as e:
             raise TokenRefused(str(e)) from e
+        return self._principal(claims)
 
+    def principal_of_authorized(self, token: str) -> Principal:
+        try:
+            claims = jwt.decode(
+                token,
+                issuer=self._issuer,
+                # The authorizer in front checked the signature; every other check is made here.
+                options={"verify_signature": False, "verify_exp": True, "verify_nbf": True,
+                         "verify_iat": True, "verify_iss": True, "verify_aud": False,
+                         "require": ["exp", "iss", "sub"]},
+            )
+        except jwt.PyJWTError as e:
+            raise TokenRefused(str(e)) from e
+        return self._principal(claims)
+
+    def _principal(self, claims: dict) -> Principal:
+        """What a token's claims must say beyond its signature, issuer and expiry."""
         # An access token: what the website and Quick send, and the only kind that carries the
         # gateway's scope. An ID token is for the client that asked for it, not for an API.
         token_use = claims.get("token_use", "")

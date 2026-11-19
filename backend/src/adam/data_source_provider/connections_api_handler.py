@@ -183,18 +183,22 @@ def _probe_candidate(user_id: str, entry: dict, username: str, password: str) ->
     """Check a typed login against a registered database without keeping it; None means usable.
     A user whose typed logins were refused too often is refused here, before the database is asked."""
     try:
-        login_attempts.require_allowed(user_id)
+        window = login_attempts.reserve(user_id)
     except login_attempts.TooManyFailures as e:
         logger.warning("Login checks refused for user %s: too many refused logins", user_id)
         raise Rejected(str(e)) from None
-    validate_target(entry["host"])
-    candidate = _store(user_id, entry, username, password)
+    problem = None
     try:
-        problem = _probe_stored(candidate, entry)
+        validate_target(entry["host"])
+        candidate = _store(user_id, entry, username, password)
+        try:
+            problem = _probe_stored(candidate, entry)
+        finally:
+            _remove(candidate)
     finally:
-        _remove(candidate)
-    if problem:
-        login_attempts.record_failure(user_id)
+        # Only a check that comes back refused stays counted.
+        if not problem:
+            login_attempts.release(user_id, window)
     return problem
 
 

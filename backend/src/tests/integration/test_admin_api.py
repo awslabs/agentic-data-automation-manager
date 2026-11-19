@@ -61,7 +61,7 @@ ADMIN, USER = "sub-admin", "sub-user"
 def _event(user, groups, body=None):
     # As Cognito's access token carries them: the sub, the username (in this pool, a generated id),
     # and the email the pool's pre token generation trigger adds.
-    claims = {"sub": user, "username": f"{user}-id", "email": f"{user}-name"}
+    claims = {"sub": user, "username": f"{user}-id", "email": f"{user}-name", "token_use": "access"}
     if groups is not None:
         claims["cognito:groups"] = groups
     return {"requestContext": {"authorizer": {"jwt": {"claims": claims}}}}
@@ -127,7 +127,7 @@ class _Bus:
 
 
 @pytest.fixture
-def api(registry, scan_targets_table, postgres, monkeypatch, moto_endpoint):
+def api(registry, scan_targets_table, login_attempts_table, postgres, monkeypatch, moto_endpoint):
     index = _Index()
     monkeypatch.setattr(schema_ingestion_handler, "provider_from_env", lambda: index)
     providers = f"scan-providers-{uuid.uuid4().hex[:8]}"
@@ -870,12 +870,13 @@ class TestScans:
         sent = _spy(monkeypatch)
         admin._start_scan(AS_ADMIN, {}, {}, {"targetId": target["targetId"],
                                              "scannerSecretArn": "arn:aws:secretsmanager:x:1:secret:evil",
-                                             "location": {"host": "evil"}, "host": "evil"})
-        # The login check, from the stored target, then the scan, named by its id alone.
+                                             "location": {"host": "evil"}, "host": "evil", "caller": "evil"})
+        # The login check, from the stored target (counted against the administrator asking), then the scan,
+        # named by its id alone.
         (check, scan) = [payload for _, payload in sent]
         assert check == {"operation": "probe", "args": {
             "location": {f: target[f] for f in ("host", "port", "database")},
-            "scannerSecretArn": target["scannerSecretArn"]}}
+            "scannerSecretArn": target["scannerSecretArn"], "caller": ADMIN}}
         assert scan == {"targetId": target["targetId"]}
 
     def test_an_unregistered_target_is_refused(self, api):
@@ -1031,16 +1032,64 @@ class TestOracleTlsIsDecidedWhenTheDatabaseIsSaved:
         with tls_listener(host, int(port), tmp_path) as listener:
             monkeypatch.setenv("DB_TLS_CA_FILE", listener.ca_file)
 
-            def save(at_port, at_host=host):
-                secret = _secrets().create_secret(Name=f"{SCANNER_PATH}dba-{uuid.uuid4()}", SecretString=json.dumps(
-                    {"username": seed.OWNER, "password": oracle.owner_password}))["ARN"]
+            def save(at_port, at_host=host, **confirming):
                 return _add({"engine": "oracle", "host": at_host, "port": str(at_port), "database": service,
-                             "scannerSecretArn": secret})
+                             "scannerUsername": seed.OWNER, "scannerPassword": oracle.owner_password, **confirming})
             yield save, port, listener
+
+    @staticmethod
+    def _without_tls(save, port, **extra):
+        """Save at a database that offers no TLS, confirming the unencrypted login the save asks about."""
+        asked = save(port, **extra)
+        assert asked["statusCode"] == 200 and _body(asked)["plaintextToConfirm"] is True, _body(asked)
+        return save(port, confirmPlaintext=True, **extra)
+
+    def test_a_database_without_tls_is_not_logged_in_to_until_the_user_confirms(self, oracle_saved, oracle):
+        """Without TLS the scanner's password, and later every user's, would cross the network in the clear:
+        the save asks first and stores nothing, and the database is sent nothing but TLS handshakes."""
+        import socket
+        import threading
+
+        from tests.integration.tls_proxy import _pump
+
+        save, plain_port, _ = oracle_saved
+        host = oracle.dsn.split(":", 1)[0]
+        first_bytes = []
+        relay = socket.create_server(("127.0.0.1", 0))
+
+        def serve():
+            while True:
+                try:
+                    client, _ = relay.accept()
+                except OSError:
+                    return
+                first = client.recv(1, socket.MSG_PEEK)
+                first_bytes.append(first)
+                upstream = socket.create_connection((host, int(plain_port)))
+                threading.Thread(target=_pump, args=(client, upstream), daemon=True).start()
+                threading.Thread(target=_pump, args=(upstream, client), daemon=True).start()
+        threading.Thread(target=serve, daemon=True).start()
+        before = _scanner_logins()
+        try:
+            response = save(relay.getsockname()[1])
+        finally:
+            relay.close()
+        assert response["statusCode"] == 200, _body(response)
+        body = _body(response)
+        assert body["plaintextToConfirm"] is True and "Nothing was saved" in body["question"]
+        assert "did not answer TLS on this port" in body["question"]
+        assert _targets() == [] and _scanner_logins() == before
+        # 0x16 opens a TLS handshake; a TNS connect (an unencrypted login) opens with anything else.
+        assert first_bytes and all(b == b"\x16" for b in first_bytes), first_bytes
+
+    def test_a_confirmation_that_is_not_true_or_false_is_refused(self, oracle_saved):
+        save, plain_port, _ = oracle_saved
+        response = save(plain_port, confirmPlaintext="yes")
+        assert response["statusCode"] == 400 and _targets() == []
 
     def test_a_database_without_tls_is_saved_without_it_and_the_admin_is_told(self, oracle_saved):
         save, plain_port, listener = oracle_saved
-        response = save(plain_port)
+        response = self._without_tls(save, plain_port)
         assert response["statusCode"] == 201, _body(response)
         saved = _body(response)
         assert saved["tls"] is False
@@ -1077,13 +1126,14 @@ class TestOracleTlsIsDecidedWhenTheDatabaseIsSaved:
 
     def test_a_database_with_its_own_certificate_is_saved_with_tls_trusting_only_it(self, oracle_saved,
                                                                                    own_certificate):
-        """No CA in the bundle signed it, so the save trusts the one it presents, keeps it, and
-        shows its fingerprint; the probe and the scan go over TLS trusting that certificate."""
+        """No CA in the bundle signed it, so once the user confirms its fingerprint the save trusts the
+        one it presents, keeps it, and shows its fingerprint; the probe and the scan go over TLS
+        trusting that certificate."""
         import hashlib
         import ssl
 
         save, _, _ = oracle_saved
-        response = save(own_certificate.port, own_certificate.host)
+        response = self._confirmed(save, own_certificate)
         assert response["statusCode"] == 201, _body(response)
         saved = _body(response)
         digest = hashlib.sha256(ssl.PEM_cert_to_DER_cert(own_certificate.certificate)).hexdigest().upper()
@@ -1100,7 +1150,7 @@ class TestOracleTlsIsDecidedWhenTheDatabaseIsSaved:
         database's own certificate, not the CA, so one certificate anchors the chain."""
         save, _, listener = oracle_saved
         monkeypatch.setenv("DB_TLS_CA_FILE", str(__import__("certifi").where()))
-        response = save(listener.port, listener.host)
+        response = self._confirmed(save, listener)
         assert response["statusCode"] == 201, _body(response)
         assert _body(response)["tls"] is True and _body(response)["tlsFingerprint"]
         (target,) = _targets()
@@ -1116,11 +1166,59 @@ class TestOracleTlsIsDecidedWhenTheDatabaseIsSaved:
         assert response["statusCode"] == 400 and "ORA-01017" in _body(response)["error"]
         assert _targets() == []
 
+    @staticmethod
+    def _fingerprint(pem: str) -> str:
+        import hashlib
+        import ssl
+        digest = hashlib.sha256(ssl.PEM_cert_to_DER_cert(pem)).hexdigest().upper()
+        return ":".join(digest[i:i + 2] for i in range(0, len(digest), 2))
+
+    @staticmethod
+    def _confirmed(save, listener):
+        """Save at a database presenting its own certificate, confirming the fingerprint the save shows."""
+        shown = _body(save(listener.port, listener.host))["tlsFingerprintToConfirm"]
+        return save(listener.port, listener.host, tlsFingerprint=shown)
+
+    def test_its_own_certificate_is_not_trusted_until_the_user_confirms_its_fingerprint(self, oracle_saved,
+                                                                                        own_certificate):
+        """Trusting a certificate no CA signed is the user's decision: the save shows its fingerprint
+        and stores nothing, not the version, its scanner login or its schedule."""
+        save, _, _ = oracle_saved
+        before = _scanner_logins()
+        response = save(own_certificate.port, own_certificate.host)
+        assert response["statusCode"] == 200, _body(response)
+        assert _body(response)["tlsFingerprintToConfirm"] == self._fingerprint(own_certificate.certificate)
+        assert "Nothing was saved" in _body(response)["question"]
+        assert _targets() == [] and _scanner_logins() == before
+
+    def test_a_certificate_other_than_the_one_confirmed_is_not_trusted(self, oracle_saved, oracle, tmp_path):
+        """The save trusts only a certificate it is presented itself: a fingerprint confirmed for
+        another (the database's, before something in the way swapped it) is asked about again."""
+        from tests.integration.tls_proxy import tls_listener
+
+        save, _, _ = oracle_saved
+        host, rest = oracle.dsn.split(":", 1)
+        upstream = int(rest.split("/", 1)[0])
+        for name in ("first", "second"):
+            (tmp_path / name).mkdir()
+        with tls_listener(host, upstream, tmp_path / "first", self_signed=True) as first:
+            shown = _body(save(first.port, first.host))["tlsFingerprintToConfirm"]
+        with tls_listener(host, upstream, tmp_path / "second", self_signed=True) as second:
+            response = save(second.port, second.host, tlsFingerprint=shown)
+        assert response["statusCode"] == 200, _body(response)
+        assert _body(response)["tlsFingerprintToConfirm"] == self._fingerprint(second.certificate) != shown
+        assert _targets() == []
+
+    def test_a_fingerprint_that_is_not_text_is_refused(self, oracle_saved, own_certificate):
+        save, _, _ = oracle_saved
+        response = save(own_certificate.port, own_certificate.host, tlsFingerprint=["not", "text"])
+        assert response["statusCode"] == 400 and _targets() == []
+
     def test_scan_now_records_nothing_on_a_version_whose_tls_was_never_recorded(self, oracle_saved):
         """How it is reached is fixed with the version: one saved before TLS was checked gets
         a new version to record it, not a quiet write."""
         save, plain_port, _ = oracle_saved
-        saved = _body(save(plain_port))
+        saved = _body(self._without_tls(save, plain_port))
         unchecked = {k: v for k, v in scan_targets.get(saved["targetId"]).items() if k not in ("tls", "tlsWarning")}
         scan_targets._put(unchecked)
         response = admin._start_scan(AS_ADMIN, {}, {}, {"targetId": saved["targetId"]})
@@ -1132,24 +1230,52 @@ class TestOracleTlsIsDecidedWhenTheDatabaseIsSaved:
         """The pinned certificate is part of the version: a database that now presents another
         is refused, and the pin stays as it was."""
         save, _, listener = oracle_saved
-        saved = _body(save(own_certificate.port, own_certificate.host))
+        saved = _body(self._confirmed(save, own_certificate))
         stored = scan_targets.get(saved["targetId"])
         other = Path(listener.ca_file).read_text()   # a certificate the database does not present
         scan_targets._put({**stored, "tlsCertificate": other})
-        before = scan_targets.get(saved["targetId"])
+        before, completed = scan_targets.get(saved["targetId"]), len(own_certificate.handshakes)
         response = admin._start_scan(AS_ADMIN, {}, {}, {"targetId": saved["targetId"]})
         assert response["statusCode"] == 400 and "different certificate" in _body(response)["error"]
         assert scan_targets.get(saved["targetId"]) == before
+        # No handshake completed with it, so the scanner's password never went through.
+        assert len(own_certificate.handshakes) == completed
+
+    def test_a_login_edit_never_sends_the_password_past_a_certificate_the_version_did_not_pin(
+            self, oracle_saved, own_certificate, oracle):
+        save, _, listener = oracle_saved
+        saved = _body(self._confirmed(save, own_certificate))
+        stored = scan_targets.get(saved["targetId"])
+        scan_targets._put({**stored, "tlsCertificate": Path(listener.ca_file).read_text()})
+        before, completed = scan_targets.get(saved["targetId"]), len(own_certificate.handshakes)
+        response = _update(saved["targetId"], {"scannerUsername": seed.OWNER, "scannerPassword": oracle.owner_password})
+        assert response["statusCode"] == 400 and "different certificate" in _body(response)["error"]
+        assert len(own_certificate.handshakes) == completed
+        assert scan_targets.get(saved["targetId"]) == before
+
+    def test_a_version_still_presenting_its_pinned_certificate_is_checked_over_it(self, oracle_saved,
+                                                                                  own_certificate):
+        save, _, _ = oracle_saved
+        saved = _body(self._confirmed(save, own_certificate))
+        completed = len(own_certificate.handshakes)
+        response = admin._start_scan(AS_ADMIN, {}, {}, {"targetId": saved["targetId"]})
+        assert response["statusCode"] in (200, 202), _body(response)
+        assert len(own_certificate.handshakes) > completed
 
     def test_a_new_version_records_what_the_database_presents_now(self, oracle_saved, own_certificate):
+        """Once the user confirms the certificate it presents: a new version is asked about as a new database is."""
         save, plain_port, _ = oracle_saved
-        first = _body(save(plain_port))
+        first = _body(self._without_tls(save, plain_port))
         assert first["tls"] is False
-        secret = _secrets().create_secret(Name=f"{SCANNER_PATH}dba-{uuid.uuid4()}", SecretString=json.dumps(
-            {"username": seed.OWNER, "password": _value(first["scannerSecretArn"])["password"]}))["ARN"]
-        response = _new_version(first["targetId"], {"host": own_certificate.host, "port": str(own_certificate.port),
-                                                    "scannerSecretArn": secret})
+        moved = {"host": own_certificate.host, "port": str(own_certificate.port), "scannerUsername": seed.OWNER,
+                 "scannerPassword": _value(first["scannerSecretArn"])["password"]}
+        asked = _new_version(first["targetId"], moved)
+        assert asked["statusCode"] == 200, _body(asked)
+        assert [t["version"] for t in _targets()] == [1]
+        shown = _body(asked)["tlsFingerprintToConfirm"]
+        response = _new_version(first["targetId"], {**moved, "tlsFingerprint": shown})
         assert response["statusCode"] == 201, _body(response)
+        assert _body(response)["tlsFingerprint"] == shown
         second = scan_targets.get(_body(response)["targetId"])
         assert second["tls"] is True and _der(second["tlsCertificate"]) == _der(own_certificate.certificate)
         assert scan_targets.get(first["targetId"])["tls"] is False   # the first version is as it was
@@ -1163,6 +1289,97 @@ class TestOracleTlsIsDecidedWhenTheDatabaseIsSaved:
                          "database": rest.split("/", 1)[1], "scannerSecretArn": secret})
         assert response["statusCode"] == 400 and "ORA-01017" in _body(response)["error"]
         assert _targets() == []
+
+
+class TestRegistrationLoginsCountTowardTheLimit:
+    """A registration's scanner login check tries a password against a database, as the Connections
+    page's check does: both count against one limit per user (here the administrator asking), and past
+    it nothing is dialed."""
+
+    @staticmethod
+    def _dials(monkeypatch, then=None):
+        """Every time the scanner opens a database; `then` runs first, as if another check overlapped it."""
+        dialed, real = [], scanner_handler._open
+
+        def opening(*args, **kwargs):
+            dialed.append(args[0]["host"])
+            if then:
+                then(dialed)
+            return real(*args, **kwargs)
+        monkeypatch.setattr(scanner_handler, "_open", opening)
+        return dialed
+
+    @staticmethod
+    def _wrong(postgres, as_=AS_ADMIN):
+        return admin._add_scan_target(as_, {}, {}, {
+            "name": f"db-{uuid.uuid4().hex[:8]}", "statementTimeoutSeconds": 30, "rowCap": 1000,
+            **_location(postgres), "scannerUsername": seed.OWNER, "scannerPassword": WRONG_PASSWORD})
+
+    def test_past_the_limit_a_registration_is_refused_before_its_database_is_dialed(self, api, monkeypatch):
+        from adam.data_source_provider import login_attempts
+        _, postgres = api
+        for _ in range(login_attempts.MAX_FAILURES):
+            assert self._wrong(postgres)["statusCode"] == 400
+        dialed = self._dials(monkeypatch)
+        response = _add({**_location(postgres), "scannerSecretArn": _byo_secret(postgres)})
+        assert response["statusCode"] == 400 and "Too many logins were refused" in _body(response)["error"]
+        assert dialed == [] and _targets() == []
+
+    def test_refusals_on_the_connections_page_count_toward_it(self, api, monkeypatch):
+        from adam.data_source_provider import login_attempts
+        _, postgres = api
+        for _ in range(login_attempts.MAX_FAILURES):
+            login_attempts.reserve(ADMIN)  # as the Connections page counts each check it sends
+        dialed = self._dials(monkeypatch)
+        response = _add({**_location(postgres), "scannerSecretArn": _byo_secret(postgres)})
+        assert "Too many logins were refused" in _body(response)["error"] and dialed == []
+
+    def test_refused_registrations_count_toward_the_connections_page(self, api):
+        from adam.data_source_provider import login_attempts
+        _, postgres = api
+        for _ in range(login_attempts.MAX_FAILURES):
+            self._wrong(postgres)
+        with pytest.raises(login_attempts.TooManyFailures):
+            login_attempts.reserve(ADMIN)
+
+    def test_registrations_that_overlap_dial_at_most_the_limit(self, api, monkeypatch):
+        from adam.data_source_provider import login_attempts
+        _, postgres = api
+        answers = []
+
+        def overlap(dialed):
+            if len(dialed) < login_attempts.MAX_FAILURES + 5:
+                answers.append(self._wrong(postgres))
+        dialed = self._dials(monkeypatch, then=overlap)
+        self._wrong(postgres)
+        assert len(dialed) == login_attempts.MAX_FAILURES
+        assert sum("Too many logins were refused" in _body(a).get("error", "") for a in answers) == 1
+
+    def test_logins_that_work_are_not_counted(self, api):
+        from adam.data_source_provider import login_attempts
+        _, postgres = api
+        target = _registered(postgres)
+        for _ in range(login_attempts.MAX_FAILURES + 2):
+            response = admin._start_scan(AS_ADMIN, {}, {}, {"targetId": target["targetId"]})
+            assert response["statusCode"] in (200, 202), _body(response)
+
+    def test_one_administrators_refusals_do_not_limit_another(self, api):
+        from adam.data_source_provider import login_attempts
+        _, postgres = api
+        for _ in range(login_attempts.MAX_FAILURES):
+            self._wrong(postgres)
+        response = admin._add_scan_target(_event("sub-other-admin", "[admin]"), {}, {}, {
+            "name": f"db-{uuid.uuid4().hex[:8]}", "statementTimeoutSeconds": 30, "rowCap": 1000,
+            **_location(postgres), "scannerSecretArn": _byo_secret(postgres)})
+        assert response["statusCode"] == 201, _body(response)
+
+    def test_a_probe_that_names_no_caller_is_refused_before_anything_is_dialed(self, api, monkeypatch):
+        _, postgres = api
+        dialed = self._dials(monkeypatch)
+        answer = scanner_handler.handler({"operation": "probe", "args": {
+            "engine": "postgres", "location": _location(postgres),
+            "scannerSecretArn": f"arn:aws:secretsmanager:us-east-1:123456789012:secret:{SCANNER_PATH}x"}}, None)
+        assert "names who asks for it" in answer["error"] and dialed == []
 
 
 class TestVersions:

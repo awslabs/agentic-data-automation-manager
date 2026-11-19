@@ -7,7 +7,8 @@
 It builds the UI from the backend's stack outputs, which install_cdk.sh writes to
 frontend/backend_outputs_<stage>.json, then deploys it to S3 and CloudFront:
 
-    cdk deploy -c stage=dev
+    cdk deploy AdamDev-Frontend -c stage=dev
+    cdk deploy AdamDev-FrontendLogs -c stage=dev -c distributionId=<the Frontend stack's DistributionId>
 """
 
 import json
@@ -20,7 +21,8 @@ import aws_cdk as cdk
 from cdk_nag import AwsSolutionsChecks
 
 from cdk_infra import nag
-from cdk_infra.app_config import connect_sources, stack_prefix
+from cdk_infra.app_config import connect_sources, is_production, stack_prefix
+from cdk_infra.frontend_logs_stack import LOG_DELIVERY_REGION, FrontendLogsStack
 from cdk_infra.frontend_stack import FrontendStack
 
 HERE = Path(__file__).resolve().parent
@@ -63,11 +65,21 @@ if build.returncode != 0:
 
 FrontendStack(app, f"{PREFIX}-Frontend",
     parent_stack_name=PREFIX,
-    production=STAGE == "prod",
     dist_path=str(UI_DIR / "dist"),
     connect_sources=connect_sources(outputs, REGION),
     env=env,
 )
+
+# The distribution's access logs, set up in us-east-1 once the distribution exists: install_cdk.sh
+# deploys this stack after the one above, with its id.
+DISTRIBUTION_ID = app.node.try_get_context("distributionId")
+if DISTRIBUTION_ID:
+    FrontendLogsStack(app, f"{PREFIX}-FrontendLogs",
+        parent_stack_name=PREFIX,
+        production=is_production(STAGE),
+        distribution_id=DISTRIBUTION_ID,
+        env=cdk.Environment(account=env.account, region=LOG_DELIVERY_REGION),
+    )
 
 # Every stack is checked against the AWS Solutions rules on synth; an unresolved finding fails it.
 cdk.Aspects.of(app).add(AwsSolutionsChecks())

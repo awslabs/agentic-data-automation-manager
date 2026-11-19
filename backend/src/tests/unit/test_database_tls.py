@@ -195,9 +195,21 @@ class TestTheAdminsProbeDecidesOracleTls:
         ("DPY-6005: cannot connect to database. [SSL: UNEXPECTED_EOF_WHILE_READING]", "did not answer TLS"),
         ("DPY-6006: The name on the server certificate does not match", "does not name the host"),
     ])
-    def test_without_tls_it_connects_as_registered_and_warns_why(self, monkeypatch, refusal, says):
+    def test_without_tls_it_asks_first_and_sends_no_unencrypted_login(self, monkeypatch, refusal, says):
         monkeypatch.setenv("DB_TLS_CA_FILE", str(BUNDLE))
         provider, calls = self._provider(monkeypatch, {"discoverTls": True}, answers=[refusal])
+        result = provider.probe()
+        assert (result["ok"], result["plaintextToConfirm"]) == (False, True)
+        assert "TLS is not enabled on this database" in result["tlsWarning"] and says in result["tlsWarning"]
+        assert [c["dsn"] for c in calls] == ["tcps://db.example.com:2484/svc"]
+
+    @pytest.mark.parametrize("refusal, says", [
+        ("DPY-6005: cannot connect to database. [SSL: UNEXPECTED_EOF_WHILE_READING]", "did not answer TLS"),
+    ])
+    def test_once_confirmed_it_connects_without_tls_and_warns_why(self, monkeypatch, refusal, says):
+        monkeypatch.setenv("DB_TLS_CA_FILE", str(BUNDLE))
+        provider, calls = self._provider(monkeypatch, {"discoverTls": True, "allowPlaintext": True},
+                                         answers=[refusal])
         result = provider.probe()
         assert (result["ok"], result["tls"]) == (True, False)
         assert "TLS is not enabled on this database" in result["tlsWarning"] and says in result["tlsWarning"]
@@ -255,8 +267,8 @@ class TestADatabaseWithItsOwnCertificate:
         provider, calls = self._provider(monkeypatch, {"discoverTls": True}, answers=[
             "DPY-6005: [SSL: CERTIFICATE_VERIFY_FAILED] self-signed certificate"])
         result = provider.probe()
-        assert result["tls"] is False and "could not be read" in result["tlsWarning"]
-        assert [c["dsn"] for c in calls] == ["tcps://db.example.com:2484/svc", "db.example.com:2484/svc"]
+        assert result["plaintextToConfirm"] is True and "could not be read" in result["tlsWarning"]
+        assert [c["dsn"] for c in calls] == ["tcps://db.example.com:2484/svc"]
 
     def test_the_save_pins_what_the_database_presents_when_the_bundle_refuses_it(self, monkeypatch):
         from adam.data_source_provider import oracle_provider

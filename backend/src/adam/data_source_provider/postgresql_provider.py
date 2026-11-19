@@ -100,9 +100,13 @@ can read.
             conn.run("START TRANSACTION READ ONLY")
             try:
                 conn.run(f"SET LOCAL statement_timeout = {int(timeout_seconds) * 1000}")
-                conn.run("DECLARE mcp_cursor NO SCROLL CURSOR FOR\n" + statement)
+                # As one statement (the extended protocol, which run() uses only with parameters): a simple
+                # query would run "...; COMMIT; DELETE ..." as three, the COMMIT ending READ ONLY.
+                conn.execute_unnamed("DECLARE mcp_cursor NO SCROLL CURSOR FOR\n" + statement)
                 if start_row:
                     conn.run(f"MOVE FORWARD {int(start_row)} FROM mcp_cursor")
+                    # Again: rows read while skipping run the statement, which can change the setting.
+                    conn.run(f"SET LOCAL statement_timeout = {int(timeout_seconds) * 1000}")
                 fetched = conn.run(f"FETCH FORWARD {int(row_cap) + 1} FROM mcp_cursor")
                 columns = [col["name"] for col in conn.columns] if conn.columns else []
             finally:

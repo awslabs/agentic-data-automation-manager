@@ -271,9 +271,10 @@ class TestNoBroadGrants:
         writes = [s for s in _statements(templates["agent"])
                   if any(a.startswith("logs:") and a != "logs:CreateLogDelivery" for a in _actions(s))]
         assert writes, "the chat agent writes its own logs"
+        events_log = {"Fn::GetAtt": [_events_log_group(templates)[0], "Arn"]}
         for s in writes:
             for r in _resources(s):
-                assert ":log-group:/aws/bedrock-agentcore/runtimes/" in json.dumps(r), s
+                assert ":log-group:/aws/bedrock-agentcore/runtimes/" in json.dumps(r) or r == events_log, s
 
     def test_nothing_in_the_agent_stack_reads_a_secret(self, templates):
         """The connections routes ask a provider to log in; only providers hold credentials."""
@@ -429,11 +430,15 @@ class TestScanners:
         for s in statements:
             for service in {a.split(":")[0] for a in _actions(s)}:
                 by_service.setdefault(service, []).append(s)
-        assert set(by_service) == {"secretsmanager", "s3", "events", "sqs", "kms"}, statements
+        assert set(by_service) == {"secretsmanager", "s3", "events", "sqs", "kms", "dynamodb"}, statements
         # Its settings and the dead-letter queue are under the stack's own key, and no other.
         assert all(_resources(s) == _own_key(templates, "external") for s in by_service["kms"])
         # A failed scan's event goes to the dead-letter queue, and only there.
         assert all("ScanRequestsDeadLetterQueue" in json.dumps(_resources(s)) for s in by_service["sqs"])
+        # It counts a login check against its caller's limit, and does nothing else with any table.
+        (attempts,) = by_service["dynamodb"]
+        assert _actions(attempts) == ["dynamodb:UpdateItem"]
+        assert "LoginAttemptsTable" in json.dumps(_resources(attempts))
         (secrets,) = by_service["secretsmanager"]
         assert sorted(_actions(secrets)) == ["secretsmanager:CreateSecret", "secretsmanager:DeleteSecret",
                                              "secretsmanager:GetSecretValue"]
@@ -925,3 +930,40 @@ def test_the_gateway_returns_no_debug_detail_to_callers(templates):
     """DEBUG exception level sends internal error detail back to whoever called the tool."""
     (gateway,) = templates["agent"].find_resources("AWS::BedrockAgentCore::Gateway").values()
     assert "ExceptionLevel" not in gateway["Properties"]
+
+
+
+def _events_api(templates) -> tuple[str, dict]:
+    ((logical_id, api),) = templates["agent"].find_resources("AWS::AppSync::Api").items()
+    return logical_id, api["Properties"]
+
+
+def _events_log_group(templates) -> tuple[str, dict]:
+    ((logical_id, group),) = [(k, g["Properties"]) for k, g in templates["agent"].find_resources("AWS::Logs::LogGroup").items()
+                              if "/aws/appsync/apis/" in json.dumps(g["Properties"].get("LogGroupName"))]
+    return logical_id, group
+
+
+class TestTheEventsApiLogsItsErrorsOnly:
+    """The AppSync Events API logs its errors, in its own log group. Never the events:
+    they are users' answers, which AppSync logs only at DEBUG and ALL."""
+
+    def test_it_logs_errors_and_nothing_more(self, templates):
+        assert _events_api(templates)[1]["EventConfig"]["LogConfig"]["LogLevel"] == "ERROR"
+
+    def test_its_log_group_is_the_one_appsync_writes_encrypted_and_kept_as_the_stages_logs(self, templates):
+        api_id, _ = _events_api(templates)
+        _, group = _events_log_group(templates)
+        assert group["LogGroupName"] == {"Fn::Join": ["", ["/aws/appsync/apis/", {"Fn::GetAtt": [api_id, "ApiId"]}]]}
+        assert "DataKey" in json.dumps(group["KmsKeyId"]) and group["RetentionInDays"] > 0
+
+    def test_only_appsync_in_this_account_may_use_its_role_and_only_to_write_there(self, templates):
+        template = templates["agent"]
+        role_arn = _events_api(templates)[1]["EventConfig"]["LogConfig"]["CloudWatchLogsRoleArn"]
+        role_id = role_arn["Fn::GetAtt"][0]
+        (trust,) = template.find_resources("AWS::IAM::Role")[role_id]["Properties"]["AssumeRolePolicyDocument"]["Statement"]
+        assert trust["Principal"] == {"Service": "appsync.amazonaws.com"}
+        assert trust["Condition"] == {"StringEquals": {"aws:SourceAccount": ENV.account}}
+        group = {"Fn::GetAtt": [_events_log_group(templates)[0], "Arn"]}
+        assert [(sorted(_actions(s)), _resources(s)) for s in _role_policy_statements(template, role_id)] == [
+            (["logs:CreateLogStream", "logs:PutLogEvents"], [group])]

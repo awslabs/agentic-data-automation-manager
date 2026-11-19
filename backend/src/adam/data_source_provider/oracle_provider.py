@@ -167,7 +167,15 @@ constraints and comments visible in the ALL_* views without allowing queries on 
         """Log in. Asked to discover TLS (the admin saving a database, through its scanner),
         try TLS first and report which was used, with the reason when it was not."""
         if self._row.get("discoverTls") is not True:
-            self._select_one()
+            try:
+                self._select_one()
+            except RuntimeError as e:
+                if self._row.get("tlsCertificate") and "CERTIFICATE_VERIFY_FAILED" in str(e):
+                    raise RuntimeError(
+                        "It did not present the certificate pinned for it (a different certificate, or that one has "
+                        "expired), so nothing was sent to it. If you trust what it presents now, publish a new "
+                        "version.") from e
+                raise
             return {"ok": True}
         self._row["tls"] = True
         try:
@@ -198,6 +206,10 @@ constraints and comments visible in the ALL_* views without allowing queries on 
                     reason = str(e)
                 del self._row["tlsCertificate"]
         self.close()
+        # Without TLS the login would cross the network in the clear: only once the owner confirms it
+        # (allowPlaintext). TLS turned off for a local test container is the deployment's own choice.
+        if reason != _TLS_OFF and self._row.get("allowPlaintext") is not True:
+            return {"ok": False, "plaintextToConfirm": True, "tlsWarning": _no_tls_warning(reason)}
         self._row["tls"] = False
         try:
             self._select_one()

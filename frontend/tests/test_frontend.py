@@ -19,6 +19,7 @@ if str(FRONTEND) not in sys.path:
     sys.path.insert(0, str(FRONTEND))
 
 from cdk_infra.app_config import connect_sources, stack_prefix  # noqa: E402
+from cdk_infra.frontend_logs_stack import FrontendLogsStack  # noqa: E402
 from cdk_infra.frontend_stack import FrontendStack  # noqa: E402
 
 ENV = cdk.Environment(account="123456789012", region="us-west-2")
@@ -36,14 +37,22 @@ BACKEND_OUTPUTS = {
 }
 
 
-def _stack(dist: Path, production: bool = False) -> FrontendStack:
-    return FrontendStack(cdk.App(context=APP_CONTEXT), "T-Frontend", parent_stack_name="T", production=production,
+def _stack(dist: Path) -> FrontendStack:
+    return FrontendStack(cdk.App(context=APP_CONTEXT), "T-Frontend", parent_stack_name="T",
                          dist_path=str(dist), connect_sources=connect_sources(BACKEND_OUTPUTS, "us-west-2"), env=ENV)
 
 
 def test_the_stack_prefix_raises_only_the_first_letter_of_the_stage():
     assert stack_prefix("devAlice") == "AdamDevAlice"
     assert stack_prefix("dev") == "AdamDev"
+
+
+@pytest.mark.parametrize(("stage", "production"), [("prod", True), ("Prod", True), ("dev", False),
+                                                   ("devAlice", False), ("production", False)])
+def test_production_is_decided_by_the_stacks_a_stage_deploys(stage, production):
+    """"Prod" deploys prod's stacks (AdamProd), so it must keep prod's logs, not dev's month of them."""
+    from cdk_infra.app_config import is_production
+    assert is_production(stage) is production
 
 
 def _headers(tmp_path) -> dict:
@@ -218,35 +227,74 @@ def test_only_the_deployment_handler_is_exempt_from_keyed_settings(tmp_path):
     assert len(exempt) == 1 and exempt[0].startswith("CustomCDKBucketDeployment"), exempt
 
 
-def _keyed_stack(tmp_path, production):
+LOGS_ENV = cdk.Environment(account="123456789012", region="us-east-1")
+
+
+def _logs_stack(production: bool = False, distribution_id: str = "E1EXAMPLE", env=LOGS_ENV) -> FrontendLogsStack:
+    return FrontendLogsStack(cdk.App(context=APP_CONTEXT), "T-FrontendLogs", parent_stack_name="T",
+                             production=production, distribution_id=distribution_id, env=env)
+
+
+def _nag_findings(stack) -> list[str]:
+    from aws_cdk.assertions import Annotations, Match
+    from cdk_nag import AwsSolutionsChecks
+
+    from cdk_infra import nag
+    cdk.Aspects.of(stack.node.root).add(AwsSolutionsChecks())
+    nag.acknowledge_app_wide(stack.node.root)
+    annotations = Annotations.from_stack(stack)
+    return [f"{m.id}: {m.entry.data}"[:300] for level in (annotations.find_error, annotations.find_warning)
+            for m in level("*", Match.string_like_regexp("AwsSolutions-"))]
+
+
+def test_the_website_stack_sets_up_no_log_delivery_and_names_its_distribution(tmp_path):
+    """CloudFront's log delivery can only be created in us-east-1; the website stack may be anywhere."""
     (tmp_path / "index.html").write_text("<html></html>")
-    return Template.from_stack(_stack(tmp_path, production))
+    template = Template.from_stack(_stack(tmp_path))
+    for kind in ("AWS::Logs::DeliverySource", "AWS::Logs::DeliveryDestination", "AWS::Logs::Delivery"):
+        assert template.find_resources(kind) == {}
+    (distribution,) = template.find_resources("AWS::CloudFront::Distribution")
+    assert template.to_json()["Outputs"]["DistributionId"]["Value"] == {"Ref": distribution}
 
 
-def test_the_distributions_access_logs_go_to_a_log_group_under_the_stacks_key(tmp_path):
-    template = _keyed_stack(tmp_path, production=False)
+def test_the_distributions_access_logs_go_to_a_log_group_under_the_logs_stacks_key():
+    template = Template.from_stack(_logs_stack())
     (source,) = template.find_resources("AWS::Logs::DeliverySource").values()
     assert source["Properties"]["LogType"] == "ACCESS_LOGS"
-    (distribution,) = template.find_resources("AWS::CloudFront::Distribution")
-    assert distribution in json.dumps(source["Properties"]["ResourceArn"])
+    assert source["Properties"]["ResourceArn"] == "arn:aws:cloudfront::123456789012:distribution/E1EXAMPLE"
     (destination,) = template.find_resources("AWS::Logs::DeliveryDestination").values()
-    (log_group_id,) = [k for k in template.find_resources("AWS::Logs::LogGroup")
-                       if k.startswith("DistributionAccessLogs")]
+    (log_group_id,) = template.find_resources("AWS::Logs::LogGroup")
     assert destination["Properties"]["DestinationResourceArn"] == {"Fn::GetAtt": [log_group_id, "Arn"]}
     (key,) = template.find_resources("AWS::KMS::Key")
     log_group = template.find_resources("AWS::Logs::LogGroup")[log_group_id]
     assert log_group["Properties"]["KmsKeyId"] == {"Fn::GetAtt": [key, "Arn"]}
-    assert template.find_resources("AWS::Logs::Delivery")
+    (delivery,) = template.find_resources("AWS::Logs::Delivery").values()
+    (source_id,) = template.find_resources("AWS::Logs::DeliverySource")
+    assert source_id in delivery["DependsOn"]
 
 
 @pytest.mark.parametrize(("production", "kept", "days"), [(True, "Retain", 365), (False, "Delete", 30)])
-def test_prod_keeps_its_access_logs_and_the_key_that_reads_them(tmp_path, production, kept, days):
-    template = _keyed_stack(tmp_path, production)
-    (log_group,) = [v for k, v in template.find_resources("AWS::Logs::LogGroup").items()
-                    if k.startswith("DistributionAccessLogs")]
+def test_prod_keeps_its_access_logs_and_the_key_that_reads_them(production, kept, days):
+    template = Template.from_stack(_logs_stack(production))
+    (log_group,) = template.find_resources("AWS::Logs::LogGroup").values()
     (key,) = template.find_resources("AWS::KMS::Key").values()
     assert log_group["DeletionPolicy"] == key["DeletionPolicy"] == kept
     assert log_group["Properties"]["RetentionInDays"] == days
+
+
+def test_the_logs_stack_refuses_any_region_but_us_east_1():
+    with pytest.raises(ValueError, match="must be in us-east-1"):
+        _logs_stack(env=ENV)
+
+
+def test_the_logs_stack_refuses_to_build_without_the_distribution_id():
+    with pytest.raises(ValueError, match="needs the website stack's distribution id"):
+        _logs_stack(distribution_id="")
+
+
+def test_the_logs_stack_has_no_unresolved_aws_solutions_finding():
+    found = _nag_findings(_logs_stack())
+    assert not found, "\n".join(found)
 
 
 def test_no_unresolved_aws_solutions_finding(tmp_path):

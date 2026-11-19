@@ -4,8 +4,9 @@
 """Abstract base class for identity providers.
 
 An identity provider turns the caller's bearer token into a verified Principal.
-The gateway interceptor is the only caller: it is the one component that sees
-the token, and it hands the verified subject to every tool.
+The gateway interceptor verifies every tool call's token with it, signature included,
+and hands the verified subject to every tool. The agent runtime, in a VPC with no route
+to the issuer, takes the principal of the token its CUSTOM_JWT authorizer verified.
 
 Cognito is the first implementation. Another IdP is added by implementing
 `verify` and registering it in `_PROVIDERS`.
@@ -40,6 +41,17 @@ class IdentityProvider(ABC):
         """Verify a bearer token and return its principal.
 
         Raises TokenRefused for any token that does not pass. There is no partially-verified result.
+        """
+
+    @abstractmethod
+    def principal_of_authorized(self, token: str) -> Principal:
+        """The principal of a token whose signature an authorizer in front of the caller has
+        already verified against this issuer's keys: every check `verify` makes except the
+        signature, so no keys are fetched.
+
+        Only for an entry point that nothing reaches without passing that authorizer: the
+        agent runtime, behind its CUSTOM_JWT authorizer, which has no route to the issuer.
+        Raises TokenRefused as `verify` does.
         """
 
 

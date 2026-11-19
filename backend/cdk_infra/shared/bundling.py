@@ -23,8 +23,8 @@ SOURCE_EXCLUDES = ["tests", "**/__pycache__", "*.pyc"]
 # Exact versions, so every deploy builds the same function. The Lambda runtime's own boto3
 # predates Converse systemTool (Nova web grounding) and the Glue asset APIs, so those
 # functions bring their own.
-BOTO3 = "boto3==1.43.103"
-PYJWT = ("pyjwt[crypto]==2.15.0", "cryptography==50.0.1")
+BOTO3 = "boto3==1.43.127"
+PYJWT = ("pyjwt[crypto]==2.15.1", "cryptography==50.0.2")
 
 _DATABASE_PROVIDER = [
     "__init__.py",
@@ -108,7 +108,8 @@ def scanner_steps(engine: str) -> list[str]:
         copy_files("adam", ["__init__.py"], "adam"),
         copy_files("adam/data_source_provider",
                    ["__init__.py", "data_source_provider.py", "credential_provider.py",
-                    "secrets_manager_credential_provider.py", "engines.py", "scanner_handler.py"]
+                    "secrets_manager_credential_provider.py", "engines.py", "scanner_handler.py",
+                    "login_attempts.py"]
                    + list(ENGINES[engine].files),
                    "adam/data_source_provider"),
         copy_files("adam/shared", ["__init__.py", "environment.py", "scan_events.py",

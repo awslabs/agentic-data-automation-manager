@@ -42,6 +42,7 @@ that invokes the ingestion function with the target's id. All the IAM it needs
 was created at deploy time; nothing here creates a role or a policy.
 """
 
+import hashlib
 import json
 import logging
 import re
@@ -306,19 +307,25 @@ def _invoke_ingestion(payload: dict, what: str) -> dict:
     return result
 
 
-def _require_login(target: dict) -> dict:
+def _require_login(target: dict, caller: str, *, allow_plaintext: bool = False) -> dict:
     """The engine's scanner function logs in as the target's scanner, as a scan would.
 
     Returns the target with what the login found about TLS, for an engine whose
-    provider decides it (Oracle); the probe tries TLS first.
+    provider decides it (Oracle); the probe tries TLS first, and logs in without it only when
+    `allow_plaintext` (its owner confirmed). A saved version's login is checked over the
+    transport it recorded, its pinned certificate included, never found again.
     """
+    location = {f: target[f] for f in (*scan_targets.FIELDS, *scan_targets.TRANSPORT_FIELDS) if f in target}
+    confirmed = {"allowPlaintext": True} if allow_plaintext else {}
     try:
+        # The asking administrator's: the check counts against their limit on tried logins (login_attempts).
         result = _call_scanner(target["engine"], "probe", {
-            "location": {f: target[f] for f in scan_targets.FIELDS},
-            "scannerSecretArn": target["scannerSecretArn"],
+            "location": location, "scannerSecretArn": target["scannerSecretArn"], "caller": caller, **confirmed,
         }, f"Checking the scanner login for {target['identity']}")
     except ProviderError as e:
         raise Rejected("The scanner login could not be checked; the scanner function's log has the reason.") from e
+    if result.get("plaintextToConfirm"):
+        raise _PlaintextToConfirm(target["identity"], str(result.get("tlsWarning", "")))
     if not result.get("ok"):
         raise Rejected("The scanner login could not be checked.")
     if "tls" not in result:
@@ -444,6 +451,67 @@ def _same_certificate(a: str | None, b: str | None) -> bool:
         return a.strip() == b.strip()
 
 
+class _CertificateToConfirm(Exception):
+    """The database presents a certificate no CA the service trusts signed, and the request did
+    not confirm that certificate's fingerprint: trusting it is the user's decision."""
+
+    def __init__(self, identity: str, fingerprint: str):
+        super().__init__(f"{identity} presents a certificate that no CA this service trusts signed. Its SHA-256 "
+                         f"fingerprint is {fingerprint}. Check it matches the certificate on the database, then "
+                         "save again confirming it. Nothing was saved.")
+        self.fingerprint = fingerprint
+
+
+class _PlaintextToConfirm(Exception):
+    """The database offers no TLS, and the request did not confirm a login without it: the scanner's
+    password, and later every user's, would cross the network unencrypted."""
+
+    def __init__(self, identity: str, warning: str):
+        super().__init__(f"{identity} offers no TLS, so the scanner's login, and later every user's, would be "
+                         f"sent unencrypted. {warning} Nothing was saved. To register it without TLS, save again "
+                         "confirming it.")
+
+
+def _confirmed_plaintext(body: dict) -> bool:
+    """Whether the request confirms a login without TLS, which an earlier save asked about."""
+    value = body.get("confirmPlaintext", False)
+    if not isinstance(value, bool):
+        raise Rejected("confirmPlaintext is true or false.")
+    return value
+
+
+def _certificate_fingerprint(pem: str) -> str:
+    digest = hashlib.sha256(ssl.PEM_cert_to_DER_cert(pem)).hexdigest().upper()
+    return ":".join(digest[i:i + 2] for i in range(0, len(digest), 2))
+
+
+def _confirmed_fingerprint(body: dict) -> str | None:
+    """The fingerprint the request confirms, of the certificate an earlier save showed."""
+    value = body.get("tlsFingerprint")
+    if value is not None and not isinstance(value, str):
+        raise Rejected("tlsFingerprint is the SHA-256 fingerprint the save showed, as text.")
+    return value
+
+
+def _asked_to_confirm(e: _CertificateToConfirm | _PlaintextToConfirm) -> dict:
+    # Nothing was saved: a question for the user, which the page asks and answers by saving again. Not an
+    # error status, which the browser would report as a failed request.
+    if isinstance(e, _PlaintextToConfirm):
+        return success({"question": str(e), "plaintextToConfirm": True})
+    return success({"question": str(e), "tlsFingerprintToConfirm": e.fingerprint})
+
+
+def _require_saved_login(target: dict, caller: str) -> None:
+    """A saved version's scanner login, checked over the transport the version recorded. One that
+    recorded none and finds no TLS is not logged in to without it: a new version decides that."""
+    try:
+        found = _require_login(target, caller)
+    except _PlaintextToConfirm:
+        raise Rejected(f"{target['identity']} offers no TLS, and version {target['version']} recorded nothing about "
+                       "TLS. Nothing was sent to it. To use it without TLS, publish a new version.") from None
+    _require_same_transport(target, found)
+
+
 def _require_same_transport(target: dict, found: dict) -> None:
     """A login check against a stored version changes nothing about how it is reached: when the
     database now presents something else, the admin decides on a new version."""
@@ -484,9 +552,11 @@ def _list_scan_targets(event, path_params, query_params, body):
 
 
 def _create_version(*, location: dict, choice: dict, schedule: str | None, settings: dict,
-                    lineage_id: str | None, version: int, caller: dict) -> dict:
+                    lineage_id: str | None, version: int, caller: dict, confirmed: str | None,
+                    plaintext: bool) -> dict:
     """Check the scanner logs in where `location` says, then store the version, with what the
-    login found about TLS, and scan it. A version that cannot be checked is not stored."""
+    login found about TLS, and scan it. A version that cannot be checked is not stored, nor one
+    whose database presents a certificate no CA signed unless `confirmed` is its fingerprint."""
     target_id = str(uuid.uuid4())
     identity = _identity(location)
     with _Undo() as undo:
@@ -495,7 +565,13 @@ def _create_version(*, location: dict, choice: dict, schedule: str | None, setti
             "targetId": target_id, "lineageId": lineage_id or target_id, "version": version,
             **settings, "identity": identity, **location,
             "scannerSecretArn": arn, "scannerSecretManaged": managed, "disabled": False,
-            "createdBy": caller["by"], "createdBySub": caller["sub"], "createdAt": caller["at"]})
+            "createdBy": caller["by"], "createdBySub": caller["sub"], "createdAt": caller["at"]}, caller["sub"],
+            allow_plaintext=plaintext)
+        # The certificate this login was presented, not one an earlier request was: a swap between them is asked about.
+        if target.get("tlsCertificate"):
+            presented = _certificate_fingerprint(target["tlsCertificate"])
+            if confirmed != presented:
+                raise _CertificateToConfirm(identity, presented)
         _set_schedule(target_id, schedule, None)
         undo.append(lambda: _delete_schedule(target_id))
         scan_targets.create(target)
@@ -522,12 +598,18 @@ def _add_scan_target(event, path_params, query_params, body):
         raise Rejected(f"{identity} is already registered. Publish a new version of it instead.")
     settings = {"name": _name(body.get("name"), existing),
                 **_limits(body.get("statementTimeoutSeconds"), body.get("rowCap"))}
-    target = _create_version(location=location, choice=choice, schedule=schedule, settings=settings,
-                             lineage_id=None, version=1, caller=caller)
+    confirmed, plaintext = _confirmed_fingerprint(body), _confirmed_plaintext(body)
+    try:
+        target = _create_version(location=location, choice=choice, schedule=schedule, settings=settings,
+                                 lineage_id=None, version=1, caller=caller, confirmed=confirmed,
+                                 plaintext=plaintext)
+    except (_CertificateToConfirm, _PlaintextToConfirm) as e:
+        return _asked_to_confirm(e)
     return success(_view(target, schedule), 201)
 
 
-_NEW_VERSION_FIELDS = (*scan_targets.FIELDS, "scannerSecretArn", "scannerUsername", "scannerPassword", "schedule")
+_NEW_VERSION_FIELDS = (*scan_targets.FIELDS, "scannerSecretArn", "scannerUsername", "scannerPassword", "schedule",
+                       "tlsFingerprint", "confirmPlaintext")
 
 
 @bad_request
@@ -551,9 +633,14 @@ def _add_version(event, path_params, query_params, body):
         raise Rejected("A new version needs its own scanner login: the ARN of an existing secret, "
                        "or the scanner's username and password.")
     settings = {f: newest[f] for f in scan_targets.DATABASE_SETTINGS if f in newest}
-    target = _create_version(location=location, choice=choice,
-                             schedule=_schedule_expression(body.get("schedule")), settings=settings,
-                             lineage_id=current["lineageId"], version=versions[-1]["version"] + 1, caller=caller)
+    confirmed, plaintext = _confirmed_fingerprint(body), _confirmed_plaintext(body)
+    try:
+        target = _create_version(location=location, choice=choice,
+                                 schedule=_schedule_expression(body.get("schedule")), settings=settings,
+                                 lineage_id=current["lineageId"], version=versions[-1]["version"] + 1,
+                                 caller=caller, confirmed=confirmed, plaintext=plaintext)
+    except (_CertificateToConfirm, _PlaintextToConfirm) as e:
+        return _asked_to_confirm(e)
     return success(_view(target, _schedule(target["targetId"])), 201)
 
 
@@ -590,7 +677,7 @@ def _update_scan_target(event, path_params, query_params, body):
     with _Undo() as undo:
         if choice is not None:
             arn, managed = _apply_secret(choice, current["engine"], current["identity"], undo)
-            _require_same_transport(current, _require_login({**current, "scannerSecretArn": arn}))
+            _require_saved_login({**current, "scannerSecretArn": arn}, caller["sub"])
             scan_targets.update(current["targetId"], {"scannerSecretArn": arn, "scannerSecretManaged": managed,
                                                       **stamp})
             undo.append(lambda: scan_targets.update(current["targetId"], {
@@ -646,7 +733,7 @@ def _start_scan(event, path_params, query_params, body):
     require_group(event, ADMIN_GROUP)
     target = _find(str((body or {}).get("targetId", "")).strip())
     _require_active(target)
-    _require_same_transport(target, _require_login(target))
+    _require_saved_login(target, get_user_id(event))
     target = _queue_scan(target)
     return success(_view(target, _schedule(target["targetId"])), 202)
 

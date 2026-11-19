@@ -21,7 +21,7 @@ def test_the_chat_route_offers_no_model_when_none_is_configured(monkeypatch):
 
     monkeypatch.delenv("CHAT_MODELS", raising=False)
     with pytest.raises(RuntimeError, match="CHAT_MODELS"):
-        chat._models({"requestContext": {"authorizer": {"jwt": {"claims": {"sub": "s"}}}}}, {}, {}, None)
+        chat._models({"requestContext": {"authorizer": {"jwt": {"claims": {"sub": "s", "token_use": "access"}}}}}, {}, {}, None)
 
 
 def test_the_runtime_needs_the_model_in_the_request(monkeypatch):

@@ -71,7 +71,7 @@ def _ask(chat, user_id=ALICE, authorization=None, conversation_id=None, **body_f
     headers = {} if authorization == "" else {"authorization": authorization or "Bearer forwarded-as-is"}
     event = {"routeKey": "POST /api/chat", "pathParameters": {}, "headers": headers,
              "requestContext": {"http": {"method": "POST", "path": "/api/chat"},
-                                "authorizer": {"jwt": {"claims": {"sub": user_id}}}}}
+                                "authorizer": {"jwt": {"claims": {"sub": user_id, "token_use": "access"}}}}}
     body = {"prompt": "hi", "model": "m", "conversation_id": conversation_id or str(uuid.uuid4()), **body_fields}
     response = chat.ROUTES["POST /api/chat"](event, {}, {}, body)
     return response["statusCode"], json.loads(response["body"])
@@ -141,7 +141,7 @@ class TestWhatTheChatRouteAccepts:
         stand_in = runtime_answers(200, STARTED)
         response = chat_module.ROUTES["POST /api/chat"](
             {"routeKey": "POST /api/chat", "headers": {"authorization": "Bearer t"},
-             "requestContext": {"authorizer": {"jwt": {"claims": {"sub": ALICE}}}}},
+             "requestContext": {"authorizer": {"jwt": {"claims": {"sub": ALICE, "token_use": "access"}}}}},
             {}, {}, {"prompt": "hi", "model": "some.other-model", "conversation_id": str(uuid.uuid4())})
         assert response["statusCode"] == 400
         assert stand_in.requests == [] and client.scan(TableName=table)["Items"] == []
@@ -156,7 +156,7 @@ class TestWhatTheChatRouteAccepts:
     def test_the_offered_models_are_listed(self, chat):
         chat_module = chat[0]
         response = chat_module.ROUTES["GET /api/models"](
-            {"requestContext": {"authorizer": {"jwt": {"claims": {"sub": ALICE}}}}}, {}, {}, None)
+            {"requestContext": {"authorizer": {"jwt": {"claims": {"sub": ALICE, "token_use": "access"}}}}}, {}, {}, None)
         assert json.loads(response["body"]) == {"models": [{"id": "m", "label": "M"}]}
 
     def test_a_runtime_slow_to_acknowledge_is_pending_not_failed(self, chat, monkeypatch):

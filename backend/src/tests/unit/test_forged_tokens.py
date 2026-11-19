@@ -60,13 +60,17 @@ def _another_subject_on_a_genuine_signature(issuer):
     return f"{header}.{_b64(claims(issuer, sub='sub-mallory'))}.{signature}"
 
 
-# Tokens an attacker could send, each wrong in exactly one way.
-FORGERIES = {
+# Tokens an attacker could send, each wrong in exactly one way. These are wrong only in their
+# signature: the runtime's CUSTOM_JWT authorizer refuses them before the runtime runs.
+SIGNATURE_FORGERIES = {
     "signed by another key": lambda i: signed(claims(i), key=ATTACKER_KEY),
     "signed by another key under a kid the pool lacks": lambda i: signed(claims(i), key=ATTACKER_KEY, kid="x"),
     "unsigned (alg none)": lambda i: f"{_b64({'alg': 'none', 'typ': 'JWT', 'kid': KID})}.{_b64(claims(i))}.",
     "HS256 with the pool's public key as the secret": _hs256_with_the_public_key,
     "another user's subject on a genuine signature": _another_subject_on_a_genuine_signature,
+}
+# Wrong in what they claim, whatever their signature: refused by every entry point.
+CLAIM_FORGERIES = {
     "expired": lambda i: signed(claims(i, exp=int(time.time()) - 60)),
     "no expiry": lambda i: signed(claims(i, exp=None)),
     "not valid yet": lambda i: signed(claims(i, nbf=int(time.time()) + 3600)),
@@ -80,6 +84,7 @@ FORGERIES = {
     "an empty subject": lambda i: signed(claims(i, sub="")),
     "not a JWT": lambda i: "not-a-jwt",
 }
+FORGERIES = {**SIGNATURE_FORGERIES, **CLAIM_FORGERIES}
 
 
 # ── The verifier both entry points use ───────────────────────────────────
@@ -166,13 +171,41 @@ def test_the_runtime_starts_a_genuine_callers_turn_under_their_subject(runtime, 
     assert started[0]["args"][1] == "sub-alice"
 
 
-@pytest.mark.parametrize("forgery", FORGERIES)
+@pytest.mark.parametrize("forgery", CLAIM_FORGERIES)
 def test_the_runtime_stores_and_starts_nothing_for(runtime, issuer, forgery):
+    """SIGNATURE_FORGERIES never reach the runtime: its CUSTOM_JWT authorizer refuses them
+    (test_agent_runtime_is_optional.py checks the runtime has that authorizer, for our pool)."""
     from adam.agent_provider.agent_runtime.agent import CallerIdentityError
     invoke, written, started = runtime
     with pytest.raises(CallerIdentityError):
-        invoke(FORGERIES[forgery](issuer))
+        invoke(CLAIM_FORGERIES[forgery](issuer))
     assert written == [] and started == []
+
+
+def test_the_runtime_starts_a_turn_with_no_route_to_the_issuer(runtime, issuer, monkeypatch):
+    """The runtime runs in a VPC with no internet egress: nothing it does for a turn's
+    identity may need the issuer. It did, and every turn hung for 90 s and failed with
+    PyJWKClientConnectionError, unseen by the browser."""
+    import urllib.request
+
+    def no_route(*args, **kwargs):
+        raise AssertionError(f"the runtime reached for the network: {args[0]!r}")
+    monkeypatch.setattr(urllib.request, "urlopen", no_route)
+    monkeypatch.setenv("OIDC_ISSUER", "https://unreachable.invalid/us-east-1_pool")
+    invoke, written, started = runtime
+    token = signed(claims("https://unreachable.invalid/us-east-1_pool"))
+    assert invoke(token)["status"] == "started"
+    assert [w[0] for w in written] == ["sub-alice"] and started[0]["args"][1] == "sub-alice"
+
+
+def test_only_the_runtime_skips_the_signature_check():
+    """principal_of_authorized trusts the authorizer in front for the signature. The
+    interceptor has no such authorizer it may rely on, and must verify the signature itself."""
+    import pathlib
+    agent_provider = pathlib.Path(__file__).parents[2] / "adam" / "agent_provider"
+    callers = sorted(p.relative_to(agent_provider).as_posix() for p in agent_provider.rglob("*.py")
+                     if ".principal_of_authorized(" in p.read_text())
+    assert callers == ["agent_runtime/agent.py"]
 
 
 def test_a_verified_callers_subject_is_the_one_the_dispatcher_acts_for(interceptor, issuer, monkeypatch):

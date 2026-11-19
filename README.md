@@ -33,6 +33,9 @@ cp deploy.env.example deploy.env   # profile, Region, VPC, security group, subne
 
 `install_cdk.sh` asks for any value `deploy.env` is missing and saves it. The stack creates no VPC and no database.
 
+The website's access logs are set up by `Adam<Stage>-FrontendLogs`, in us-east-1 whatever the
+deployment's Region: CloudFront's log delivery can only be configured there.
+
 | Flag | Effect |
 |---|---|
 | `-b` | Backend stacks only |
@@ -219,6 +222,8 @@ Delete the stacks in this order: each later stack provides resources to the ones
 
 ```bash
 prefix=Adam<Stage>
+aws cloudformation delete-stack --stack-name "$prefix-FrontendLogs" --profile <profile> --region us-east-1
+aws cloudformation wait stack-delete-complete --stack-name "$prefix-FrontendLogs" --profile <profile> --region us-east-1
 for s in Frontend Agent RedshiftTestTarget DataSourceProviders GlueCatalog Auth VpcEndpoints; do
   aws cloudformation delete-stack --stack-name "$prefix-$s" --profile <profile> --region <region>
   aws cloudformation wait stack-delete-complete --stack-name "$prefix-$s" --profile <profile> --region <region>

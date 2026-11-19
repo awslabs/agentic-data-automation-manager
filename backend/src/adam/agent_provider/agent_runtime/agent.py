@@ -85,12 +85,14 @@ _identity_provider = None
 
 
 def _verified_subject(authorization: str) -> str:
-    """The `sub` of the caller's bearer token, once its signature, issuer, expiry, client
-    and kind (an access token) are verified here.
+    """The `sub` of the caller's bearer token, once its issuer, expiry, client and kind (an
+    access token) are checked here.
 
-    The runtime's CUSTOM_JWT authorizer checks the token first; this does not rely on it.
-    Every event of the turn is written under this subject, and the Gateway's interceptor
-    derives the same subject from the same token for each tool call.
+    The signature is the runtime's CUSTOM_JWT authorizer's to check: it verifies it against
+    the issuer's keys before `invoke` runs, and a runtime with that authorizer takes no
+    other kind of caller. The runtime runs in a VPC with no route to the issuer, so it
+    fetches no keys. Every event of the turn is written under this subject, and the
+    Gateway's interceptor verifies the same token, signature included, for each tool call.
     """
     global _identity_provider
     scheme, _, token = authorization.partition(" ")
@@ -99,7 +101,7 @@ def _verified_subject(authorization: str) -> str:
     if _identity_provider is None:
         _identity_provider = identity_provider_from_env()
     try:
-        return _identity_provider.verify(token).subject
+        return _identity_provider.principal_of_authorized(token).subject
     except TokenRefused as e:
         logger.warning("Refused a bearer token: %s", e)
         raise CallerIdentityError("The bearer token was not accepted.") from None

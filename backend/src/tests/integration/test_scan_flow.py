@@ -78,7 +78,7 @@ def _table(name: str, key: str) -> str:
 
 
 @pytest.fixture
-def world(scan_targets_table, postgres, moto_endpoint, monkeypatch):
+def world(scan_targets_table, login_attempts_table, postgres, moto_endpoint, monkeypatch):
     """A registered Postgres provider and a scanner login for the real database."""
     monkeypatch.setenv("AWS_ENDPOINT_URL_S3", moto_endpoint)
     providers = _table("scan-providers", "engine")
@@ -212,7 +212,9 @@ class TestTheScannerLogsInOnlyAsAScanner:
         assert answer["detail-type"] == scan_events.SCAN_FAILED and "postgres scanner" in answer["detail"]["message"]
 
     def test_the_login_check_works_and_reports_the_databases_reason(self, world):
-        check = {"operation": "probe", "args": {"location": world["location"], "scannerSecretArn": world["secret"]}}
+        # As the schema service sends it: the administrator asking, whose limit on tried logins it counts against.
+        check = {"operation": "probe", "args": {"location": world["location"], "scannerSecretArn": world["secret"],
+                                                "caller": "sub-admin"}}
         assert scanner_handler.handler(check, None) == {"response": {"ok": True}}
         boto3.client("secretsmanager").put_secret_value(
             SecretId=world["secret"], SecretString=json.dumps({"username": seed.OWNER, "password": "wrong"}))

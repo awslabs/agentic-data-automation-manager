@@ -10,6 +10,8 @@ who holds ALL on the database, so a write that fails was stopped by the
 provider's session, not by the account's privileges.
 """
 
+import socket
+
 import pytest
 
 from adam.data_source_provider.credential_provider import Credential
@@ -276,3 +278,49 @@ class TestResourceLimits:
         result = _run(owner, "SELECT balance, DATE '2026-10-15' AS d FROM wealth.accounts")
         assert result["rows"] == [{"balance": 100.5, "d": "2026-10-15"}]
 
+
+
+def _greeting_without_tls(upstream) -> bytes:
+    """The server's first packet, read whole, with its CLIENT_SSL capability (0x0800) cleared: what a man
+    in the middle sends so that a client which only prefers TLS logs in without it."""
+    header = upstream.recv(4, socket.MSG_WAITALL)
+    payload = bytearray(upstream.recv(int.from_bytes(header[:3], "little"), socket.MSG_WAITALL))
+    # protocol version, server version (NUL-ended), connection id, 8 bytes of auth data, a filler byte
+    at = payload.index(b"\0", 1) + 1 + 4 + 8 + 1
+    flags = int.from_bytes(payload[at:at + 2], "little") & ~0x0800
+    payload[at:at + 2] = flags.to_bytes(2, "little")
+    return header + bytes(payload)
+
+
+class TestTlsCannotBeStrippedOnTheWay:
+    """With TLS required, a server greeting that offers none (a man in the middle cleared it) gets no
+    login: the driver refuses before it sends the user name and password, which would go in the clear."""
+
+    def test_a_greeting_with_tls_stripped_gets_nothing_back(self, target, monkeypatch):
+        import threading
+
+        import certifi
+        import pymysql
+
+        monkeypatch.delenv("DB_TLS_DISABLED", raising=False)
+        monkeypatch.setenv("DB_TLS_CA_FILE", certifi.where())
+        sent_after_greeting = []
+        middle = socket.create_server(("127.0.0.1", 0))
+
+        def relay():
+            client, _ = middle.accept()
+            with client, socket.create_connection((target.host, target.port)) as upstream:
+                client.sendall(_greeting_without_tls(upstream))
+                client.settimeout(10)
+                while data := client.recv(65536):
+                    sent_after_greeting.append(data)
+        relaying = threading.Thread(target=relay, daemon=True)
+        relaying.start()
+        provider = PROVIDERS[target.engine](
+            {"host": "127.0.0.1", "port": str(middle.getsockname()[1]), "database": target.database},
+            Credential(seed.OWNER, target.owner_password), "test")
+        with pytest.raises(pymysql.err.OperationalError, match="SSL is required"):
+            provider.conn  # noqa: B018 - opening the session is the act under test
+        relaying.join(timeout=15)
+        middle.close()
+        assert sent_after_greeting == []

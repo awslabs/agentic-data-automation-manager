@@ -296,6 +296,26 @@ def local_aws(monkeypatch, dynamodb_endpoint, moto_endpoint):
         monkeypatch.setenv(name, value)
 
 
+@pytest.fixture
+def login_attempts_table(local_aws, monkeypatch):
+    """The provider service's table of refused typed logins, as the stack declares it."""
+    import uuid
+
+    import boto3
+    ddb = boto3.client("dynamodb")
+    table = f"login-attempts-{uuid.uuid4().hex[:8]}"
+    ddb.create_table(TableName=table, BillingMode="PAY_PER_REQUEST",
+                     AttributeDefinitions=[{"AttributeName": "userId", "AttributeType": "S"},
+                                           {"AttributeName": "window", "AttributeType": "N"}],
+                     KeySchema=[{"AttributeName": "userId", "KeyType": "HASH"},
+                                {"AttributeName": "window", "KeyType": "RANGE"}])
+    monkeypatch.setenv("LOGIN_ATTEMPTS_TABLE_NAME", table)
+    try:
+        yield table
+    finally:
+        ddb.delete_table(TableName=table)
+
+
 def register_database(engine: str, dsn: str = "", host: str = "", port="", database: str = "", *,
                       target_id: str = "", name: str = "", limits: dict | None = None) -> str:
     """Register a database as the admin routes write one -- named (its database's name unless
