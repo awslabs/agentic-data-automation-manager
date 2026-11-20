@@ -52,7 +52,8 @@ class Stage:
 
     @property
     def production(self) -> bool:
-        return self.name == PRODUCTION_STAGE
+        # By the stacks it deploys, not the spelling: "Prod" deploys prod's stacks, so it must not downgrade them.
+        return self.prefix == Stage(PRODUCTION_STAGE).prefix
 
     @property
     def data_removal_policy(self) -> RemovalPolicy:
@@ -115,8 +116,9 @@ class Stage:
             "encryption_key": self.data_key(scope),
         }
 
-    def log_group(self, scope: Construct, construct_id: str) -> logs.LogGroup:
-        return logs.LogGroup(scope, construct_id, encryption_key=self.data_key(scope),
+    def log_group(self, scope: Construct, construct_id: str, *, name: str | None = None) -> logs.LogGroup:
+        """name: only for a group whose name a service dictates (it writes there and nowhere else)."""
+        return logs.LogGroup(scope, construct_id, log_group_name=name, encryption_key=self.data_key(scope),
                              retention=self.log_retention, removal_policy=self.data_removal_policy)
 
     def python_function(self, scope: Construct, construct_id: str, *, failures: str,

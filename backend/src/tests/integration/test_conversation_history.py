@@ -58,7 +58,7 @@ def _event(user_id, route, path_params=None):
     method, path = route.split(" ", 1)
     return {"routeKey": route, "pathParameters": path_params or {}, "headers": {"authorization": "Bearer t"},
             "requestContext": {"http": {"method": method, "path": path},
-                               "authorizer": {"jwt": {"claims": {"sub": user_id}}}}}
+                               "authorizer": {"jwt": {"claims": {"sub": user_id, "token_use": "access"}}}}}
 
 
 def _call(module, user_id, route, path_params=None, body=None):

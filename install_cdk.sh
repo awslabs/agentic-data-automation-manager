@@ -153,17 +153,39 @@ echo "Deploying $prefix to account $ACCOUNT_ID in $REGION, VPC $VPC_ID"
 # The website's URL is the web client's sign-in callback. The website stack publishes it
 # in SSM, so it comes from the account, whichever checkout deploys. Only a first install,
 # before the website stack exists, has none; the Auth stack gets it once the website is up.
-website_deployed() {
+# Whether a stack exists, in REGION or the Region given second; any error but "does not exist"
+# stops the install.
+stack_exists() {
   local err
-  if err=$(aws cloudformation describe-stacks --stack-name "${prefix}-Frontend" \
-             "${profile_args[@]}" --region "$REGION" 2>&1 >/dev/null); then
+  if err=$(aws cloudformation describe-stacks --stack-name "$1" \
+             "${profile_args[@]}" --region "${2:-$REGION}" 2>&1 >/dev/null); then
     return 0
   fi
   if grep -q "does not exist" <<< "$err"; then
     return 1
   fi
-  echo "ERROR: cannot tell whether ${prefix}-Frontend is deployed: $err" >&2
+  echo "ERROR: cannot tell whether $1 is deployed: $err" >&2
   exit 1
+}
+
+# A new account or Region has no CDK toolkit, which every stack's assets go through. The website's
+# access logs are set up in us-east-1 (Adam<Stage>-FrontendLogs), so that Region needs one too.
+LOG_DELIVERY_REGION=us-east-1
+for bootstrap_region in $(printf '%s\n' "$REGION" "$LOG_DELIVERY_REGION" | sort -u); do
+  if ! stack_exists CDKToolkit "$bootstrap_region"; then
+    echo "Bootstrapping CDK in account $ACCOUNT_ID, $bootstrap_region."
+    cdk bootstrap "aws://${ACCOUNT_ID}/${bootstrap_region}" "${profile_args[@]}" || {
+      echo "ERROR: cdk bootstrap failed."; exit 1; }
+  fi
+done
+
+website_deployed() {
+  stack_exists "${prefix}-Frontend" || return 1
+  # A first deploy that failed leaves an empty ROLLBACK_COMPLETE stack, which cdk replaces.
+  local status
+  status=$(aws cloudformation describe-stacks --stack-name "${prefix}-Frontend" "${profile_args[@]}" \
+             --region "$REGION" --query "Stacks[0].StackStatus" --output text) || exit 1
+  [ "$status" != ROLLBACK_COMPLETE ]
 }
 website_url_from_ssm() {
   local url
@@ -255,6 +277,25 @@ if [ $f -eq 1 ]; then
     "${cdk_flags[@]}")
   if [ $? -ne 0 ]; then
     echo "Frontend deploy failed. Exiting."
+    exit 1
+  fi
+  # CloudFront's access logs can only be set up in us-east-1, so they are a stack of their own there.
+  distribution_id=$(aws cloudformation describe-stacks --stack-name "${prefix}-Frontend" \
+    "${profile_args[@]}" --region "$REGION" \
+    --query "Stacks[0].Outputs[?OutputKey=='DistributionId'].OutputValue" --output text) || exit 1
+  if [ -z "$distribution_id" ] || [ "$distribution_id" = None ]; then
+    echo "ERROR: ${prefix}-Frontend has no DistributionId output."
+    exit 1
+  fi
+  echo
+  echo "Deploying ${prefix}-FrontendLogs ($LOG_DELIVERY_REGION)."
+  echo
+  (cd ../frontend && cdk deploy "${prefix}-FrontendLogs" \
+    "${profile_args[@]}" \
+    -c "stage=${stage}" -c "distributionId=${distribution_id}" \
+    "${cdk_flags[@]}")
+  if [ $? -ne 0 ]; then
+    echo "FrontendLogs deploy failed. Exiting."
     exit 1
   fi
   # A new website URL (a first install) becomes the web client's sign-in callback.

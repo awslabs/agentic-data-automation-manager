@@ -144,3 +144,18 @@ def test_every_given_private_subnet_is_used():
     assert private_subnets("subnet-a, subnet-b,subnet-c") == ["subnet-a", "subnet-b", "subnet-c"]
     with pytest.raises(ValueError, match="empty entry"):
         private_subnets("subnet-a,,subnet-c")
+
+
+class TestTheStacksDecideTheStage:
+    """Production is decided by the stacks a stage name deploys, not by its spelling: "Prod" deploys prod's
+    stacks (AdamProd), so deploying with it must not give them dev's settings in place of prod's."""
+
+    @pytest.mark.parametrize("spelling", ["prod", "Prod"])
+    def test_a_name_that_deploys_prods_stacks_is_prod(self, spelling):
+        from cdk_infra.shared.stage import Stage
+        assert Stage(spelling).prefix == Stage("prod").prefix and Stage(spelling).production
+
+    @pytest.mark.parametrize("name", ["dev", "devAlice", "prodlike", "production"])
+    def test_any_other_stacks_are_not_prod(self, name):
+        from cdk_infra.shared.stage import Stage
+        assert Stage(name).prefix != Stage("prod").prefix and not Stage(name).production

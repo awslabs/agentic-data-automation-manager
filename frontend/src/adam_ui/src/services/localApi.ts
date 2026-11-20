@@ -21,6 +21,18 @@ async function authHeaders(): Promise<Record<string, string>> {
   return { Authorization: `Bearer ${token}` };
 }
 
+/** A save refused because the database presents a certificate no CA the service trusts signed: the user
+ *  checks `fingerprint` against the database's own and saves again sending it, or does not. */
+export class CertificateToConfirm extends Error {
+  constructor(message: string, readonly fingerprint: string) {
+    super(message);
+  }
+}
+
+/** A save refused because the database offers no TLS: its logins would be sent unencrypted. The user
+ *  saves again with confirmPlaintext, or does not. */
+export class PlaintextToConfirm extends Error {}
+
 async function apiFetch(path: string, init?: RequestInit): Promise<Response> {
   const headers = { ...(await authHeaders()), ...init?.headers };
   const response = await fetch(`${API_BASE}${path}`, { ...init, headers });
@@ -30,6 +42,16 @@ async function apiFetch(path: string, init?: RequestInit): Promise<Response> {
     throw new Error(detail.error || detail.message || `Request failed (${response.status})`);
   }
   return response;
+}
+
+/** A save's answer: the saved version, or the question the save asks first, when nothing was saved. */
+async function savedOrAsked(response: Response): Promise<SavedScanTarget> {
+  const body = await readJson<SavedScanTarget & {
+    question?: string; tlsFingerprintToConfirm?: string; plaintextToConfirm?: boolean;
+  }>(response);
+  if (body.tlsFingerprintToConfirm) throw new CertificateToConfirm(body.question ?? "", body.tlsFingerprintToConfirm);
+  if (body.plaintextToConfirm === true) throw new PlaintextToConfirm(body.question ?? "");
+  return body;
 }
 
 /** A caught error as the page shows it: its message, without String()'s "Error: " prefix. */
@@ -159,6 +181,13 @@ export type ScannerSecretInput =
   | { scannerUsername: string; scannerPassword: string }
   | { scannerSecretArn?: never; scannerUsername?: never; scannerPassword?: never };
 
+/** What the user confirmed after a save asked: the fingerprint of a certificate no CA signed, as a
+ *  CertificateToConfirm showed it, or a login without TLS (PlaintextToConfirm). Absent on the first save. */
+export interface CertificateConfirmation {
+  tlsFingerprint?: string;
+  confirmPlaintext?: boolean;
+}
+
 /** Where a version of a database is. Fixed for the version: a change is a new version. */
 export interface DatabaseLocation {
   host: string;
@@ -262,23 +291,23 @@ export async function listScanTargets(): Promise<ScanTargetList> {
 /** A new database: its first version. */
 export async function addScanTarget(
   target: { engine: SourceEngine; name: string } & ScanTargetLimits & DatabaseLocation & ScanSchedule
-    & ScannerSecretInput,
+    & ScannerSecretInput & CertificateConfirmation,
 ): Promise<SavedScanTarget> {
   const response = await apiFetch(`/api/admin/scan-targets`, {
     method: "POST", headers: JSON_HEADERS, body: JSON.stringify(target),
   });
-  return readJson<SavedScanTarget>(response);
+  return savedOrAsked(response);
 }
 
 /** The next version of the database `targetId` is a version of: where it is now, with its own scanner
  *  login. Its name and limits carry over; users stay on the versions they connected to until it is disabled. */
 export async function addScanTargetVersion(
-  targetId: string, version: DatabaseLocation & ScanSchedule & ScannerSecretInput,
+  targetId: string, version: DatabaseLocation & ScanSchedule & ScannerSecretInput & CertificateConfirmation,
 ): Promise<SavedScanTarget> {
   const response = await apiFetch(`/api/admin/scan-targets/${encodeURIComponent(targetId)}/versions`, {
     method: "POST", headers: JSON_HEADERS, body: JSON.stringify(version),
   });
-  return readJson<SavedScanTarget>(response);
+  return savedOrAsked(response);
 }
 
 // Only what sends nothing anywhere new: the database's name and limits (on every version of it), this

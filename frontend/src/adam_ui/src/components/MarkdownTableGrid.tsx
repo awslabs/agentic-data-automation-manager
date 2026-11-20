@@ -14,6 +14,7 @@ import {
   themeQuartz,
 } from "ag-grid-community";
 import { extractMarkdownTables, type ParsedTable } from "./markdownTables";
+import { spreadsheetSafe } from "./spreadsheetSafe";
 
 // Only what these grids use: client-side rows, the text filter (every cell is text) and CSV copy.
 ModuleRegistry.registerModules([ClientSideRowModelModule, TextFilterModule, CsvExportModule]);
@@ -34,7 +35,11 @@ function TableGrid({ table }: { table: ParsedTable }) {
 
   const handleCopy = useCallback(() => {
     if (gridRef.current?.api) {
-      const csv = gridRef.current.api.getDataAsCsv();
+      const csv = gridRef.current.api.getDataAsCsv({
+        processCellCallback: ({ value }) => spreadsheetSafe(String(value ?? "")),
+        // The header as the grid shows it (no headerValueGetter): the column API's lookup needs a module this grid lacks.
+        processHeaderCallback: ({ column }) => spreadsheetSafe(column.getColDef().headerName ?? ""),
+      });
       if (csv) void navigator.clipboard.writeText(csv);
     }
   }, []);

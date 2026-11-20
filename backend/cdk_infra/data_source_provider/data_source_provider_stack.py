@@ -68,6 +68,11 @@ from cdk_infra.shared.stage import ASYNC_DESTINATION, SYNCHRONOUS, Stage
 ACCESS_LOG_BUCKET = ("The access-log bucket itself: logging it would log into itself or into another bucket "
                      "that would need the same, without end.")
 
+#: Why a role's default policy is long (cfn-nag W76): each table, secret path, bus and function it uses
+#: is granted apart, on the actions it calls, and every statement is used.
+LEAST_PRIVILEGE_SPLIT = ("Its size is the least-privilege split: each table, secret path, bus and function is "
+                         "granted apart, on the actions it calls, and every statement is used.")
+
 class DataSourceProviderStack(Stack):
 
     def __init__(
@@ -199,6 +204,7 @@ class DataSourceProviderStack(Stack):
             environment={"STACK_NAME": parent_stack_name, **registry_env, **schema_env, **ddb_env,
                          "LOGIN_ATTEMPTS_TABLE_NAME": login_attempts_table.table_name},
         )
+        cfn_nag.skip_role_policies(self.connections_api_function.role, "W76", LEAST_PRIVILEGE_SPLIT)
         connections_api = self.connections_api_function
         connections_api.add_to_role_policy(iam.PolicyStatement(
             actions=["dynamodb:GetItem", "dynamodb:UpdateItem"], resources=[login_attempts_table.table_arn]))
@@ -251,6 +257,11 @@ class DataSourceProviderStack(Stack):
         # ── Schema scanners ────────────────────────────────────────────
         self._add_scanners(parent_stack_name, stage, lambda_vpc_config, scan_bus,
                            schema_admin_function, schema_ingestion_function)
+        # A registration's scanner login check counts against its caller's limit, the Connections page's too.
+        for fn in self.scanner_functions.values():
+            fn.add_environment("LOGIN_ATTEMPTS_TABLE_NAME", login_attempts_table.table_name)
+            fn.add_to_role_policy(iam.PolicyStatement(actions=["dynamodb:UpdateItem"],
+                                                      resources=[login_attempts_table.table_arn]))
 
         # ── Disabled versions: their users' saved logins are deleted ────
         self._add_disabled_version_cleanup(parent_stack_name, stage, scan_bus)

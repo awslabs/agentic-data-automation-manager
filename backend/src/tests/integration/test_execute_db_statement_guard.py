@@ -134,6 +134,14 @@ class TestHostileStatementsChangeNothing:
         assert result["status"]["code"] != 200
         assert _audit_rows(provider, sql) == 1
 
+    def test_a_stacked_commit_cannot_end_the_read_only_transaction(self, engine):
+        """A COMMIT in the statement would end the READ ONLY transaction and leave what follows it in
+        one that is not: the statement is sent as one, so the database refuses it outright."""
+        _, provider, sql = engine
+        result = _run(provider, f"SELECT 1; COMMIT; DELETE FROM {sql['audit']}")
+        assert result["status"]["code"] != 200
+        assert _audit_rows(provider, sql) == 1
+
 
 class TestWritesAreRefusedByTheDatabase:
     """Run as the schema owner, who holds every DML and DDL right. Nothing in the
@@ -175,6 +183,31 @@ class TestResourceLimits:
         result = provider.execute_statement(sql["sleep"], timeout_seconds=2, row_cap=10)
         assert time.monotonic() - started < 10
         assert sql["timed_out"] in result["error"], result
+
+    # Clearing the timeout from inside the statement: row 1 clears it for the rest of the
+    # transaction, row 2 sleeps. The timeout is armed when each cursor command starts.
+    CLEARS_THEN_SLEEPS = ("SELECT g, CASE WHEN g = 1 THEN set_config('statement_timeout', '0', true) END AS cleared, "
+                          "CASE WHEN g > 1 THEN pg_sleep(30) END AS slept FROM generate_series(1, 3) g")
+
+    @POSTGRES_ONLY
+    def test_a_statement_clearing_its_timeout_in_a_skipped_row_is_still_stopped(self, engine):
+        """Row 1 is read while skipping to start_row, row 2 in the page: two cursor commands."""
+        import time
+        _, provider, sql = engine
+        started = time.monotonic()
+        result = provider.execute_statement(self.CLEARS_THEN_SLEEPS, timeout_seconds=2, row_cap=1, start_row=1)
+        assert time.monotonic() - started < 10
+        assert sql["timed_out"] in result.get("error", ""), result
+
+    @POSTGRES_ONLY
+    def test_a_statement_clearing_its_timeout_within_the_page_is_still_stopped(self, engine):
+        """Both rows in one cursor command, whose timeout was armed before the statement cleared it."""
+        import time
+        _, provider, sql = engine
+        started = time.monotonic()
+        result = provider.execute_statement(self.CLEARS_THEN_SLEEPS, timeout_seconds=2, row_cap=2)
+        assert time.monotonic() - started < 10
+        assert sql["timed_out"] in result.get("error", ""), result
 
     def test_a_result_larger_than_the_cap_is_truncated_and_says_so(self, engine, monkeypatch):
         name, provider, sql = engine

@@ -27,8 +27,8 @@ from cdk_infra import cfn_nag, checkov, nag
 # Why, said once for both checkov and cdk-nag.
 WEBSITE_BUCKET_UNLOGGED = ("Read only by this distribution through origin access control and written only by the "
                            "deploy; it holds no user data whose reads need a record.")
-ACCESS_LOGS_DELIVERED = ("Access logs are delivered to the DistributionAccessLogs log group by CloudWatch Logs "
-                         "delivery; the scanners recognise only the legacy S3 logging setting.")
+ACCESS_LOGS_DELIVERED = ("Access logs are delivered to a log group by CloudWatch Logs delivery, set up in us-east-1 "
+                         "by the FrontendLogs stack; the scanners recognise only the legacy S3 logging setting.")
 NO_TLS_MINIMUM = ("Served on its cloudfront.net name, whose default certificate cannot set a minimum TLS version; "
                   "that needs a custom domain and ACM certificate.")
 NO_WEB_ACL = ("Serves only the static UI; the API it calls is the HTTP API, not behind this distribution, so a web "
@@ -40,8 +40,6 @@ class FrontendStack(Stack):
     def __init__(
         self, scope: Construct, construct_id: str, *,
         parent_stack_name: str,
-        # prod keeps its access logs a year, and with the stack; other stages a month.
-        production: bool,
         dist_path: str,
         # Every origin the UI calls: Cognito, the HTTP API and AppSync Events (frontend/app.py).
         connect_sources: list[str],
@@ -95,11 +93,9 @@ class FrontendStack(Stack):
             ),
         )
 
-        # The stack's own key, for its log groups, as the backend's stacks have.
-        # Kept whenever the logs it encrypts are kept, or they could no longer be read.
-        key = kms.Key(self, "DataKey", enable_key_rotation=True,
-                      removal_policy=RemovalPolicy.RETAIN if production else RemovalPolicy.DESTROY,
-                      description=f"{parent_stack_name}-Frontend: its access and deployment logs")
+        # The stack's own key, for its deployment logs, as the backend's stacks have.
+        key = kms.Key(self, "DataKey", enable_key_rotation=True, removal_policy=RemovalPolicy.DESTROY,
+                      description=f"{parent_stack_name}-Frontend: its deployment logs")
         key.add_to_resource_policy(iam.PolicyStatement(
             principals=[iam.ServicePrincipal(f"logs.{self.region}.amazonaws.com")],
             actions=["kms:Encrypt*", "kms:Decrypt*", "kms:ReEncrypt*", "kms:GenerateDataKey*", "kms:Describe*"],
@@ -126,20 +122,7 @@ class FrontendStack(Stack):
                     response_page_path="/index.html", ttl=Duration.seconds(0)),
             ],
         )
-        # Who loaded the site, from where: CloudFront's access logs, kept in a log group under the
-        # stack's key rather than in a bucket that would need ACLs enabled.
-        access_logs = logs.LogGroup(self, "DistributionAccessLogs", encryption_key=key,
-            retention=logs.RetentionDays.ONE_YEAR if production else logs.RetentionDays.ONE_MONTH,
-            removal_policy=RemovalPolicy.RETAIN if production else RemovalPolicy.DESTROY)
-        log_source = logs.CfnDeliverySource(self, "DistributionLogSource",
-            name=f"{parent_stack_name}-cloudfront", log_type="ACCESS_LOGS",
-            resource_arn=f"arn:aws:cloudfront::{self.account}:distribution/{distribution.distribution_id}")
-        log_destination = logs.CfnDeliveryDestination(self, "DistributionLogDestination",
-            name=f"{parent_stack_name}-cloudfront-logs", destination_resource_arn=access_logs.log_group_arn,
-            output_format="json")
-        delivery = logs.CfnDelivery(self, "DistributionLogDelivery",
-            delivery_source_name=log_source.name, delivery_destination_arn=log_destination.attr_arn)
-        delivery.add_dependency(log_source)
+        # Its access logs are FrontendLogs' (us-east-1), which install_cdk.sh gives this id.
         nag.acknowledge(distribution, "CFR3", ACCESS_LOGS_DELIVERED)
         cfn_nag.skip(distribution, "W10", ACCESS_LOGS_DELIVERED)
         checkov.skip(distribution, "CKV_AWS_86", ACCESS_LOGS_DELIVERED)
@@ -193,3 +176,4 @@ class FrontendStack(Stack):
             value=f"https://{distribution.distribution_domain_name}",
         )
         CfnOutput(self, "BucketName", value=website_bucket.bucket_name)
+        CfnOutput(self, "DistributionId", value=distribution.distribution_id)

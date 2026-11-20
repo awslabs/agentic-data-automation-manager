@@ -18,5 +18,5 @@ sys.path.insert(0, os.path.join(_SRC, ".."))
 # against the bundle layout, not the repo tree. Putting the same directories on
 # the path here lets tests import the handlers exactly as Lambda does, instead
 # of rewriting production imports to suit the tests.
-for _bundle_dir in ("adam", "adam/agent_provider"):
+for _bundle_dir in ("adam", "adam/agent_provider", "adam/auth_provider"):
     sys.path.insert(0, os.path.join(_SRC, _bundle_dir))

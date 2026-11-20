@@ -276,15 +276,50 @@ class TestToolFunctionIdentity:
 class TestApiHandlerIdentity:
     """The HTTP API reads the subject the JWT authorizer verified, or refuses."""
 
+    @staticmethod
+    def _token(**claims) -> dict:
+        """An event as the HTTP API's JWT authorizer passes it on, with the token's claims."""
+        return {"requestContext": {"authorizer": {"jwt": {"claims": {"sub": "real-subject-123", **claims}}}}}
+
     def test_returns_verified_sub(self):
         from shared.http_response import get_user_id
 
-        event = {
-            "requestContext": {
-                "authorizer": {"jwt": {"claims": {"sub": "real-subject-123"}}},
-            },
-        }
-        assert get_user_id(event) == "real-subject-123"
+        assert get_user_id(self._token(token_use="access")) == "real-subject-123"
+
+    @pytest.mark.parametrize("token_use", ["id", "Access", "access ", ""])
+    def test_a_token_that_is_not_an_access_token_is_refused(self, token_use):
+        """An ID token's audience is the web client's id, which the HTTP API's JWT authorizer accepts,
+        so the authorizer alone lets one through: only an access token is an API credential, as the
+        MCP Gateway and the Runtime already require (cognito_identity_provider._principal)."""
+        from shared.http_response import UnauthenticatedError, get_user_id
+
+        with pytest.raises(UnauthenticatedError):
+            get_user_id(self._token(token_use=token_use))
+
+    def test_a_token_that_does_not_say_what_kind_it_is_is_refused(self):
+        from shared.http_response import UnauthenticatedError, get_user_id
+
+        with pytest.raises(UnauthenticatedError):
+            get_user_id(self._token())
+
+    def test_recording_who_made_a_change_refuses_an_id_token_too(self):
+        from schema_provider import admin_handler
+        from shared.http_response import UnauthenticatedError
+
+        with pytest.raises(UnauthenticatedError):
+            admin_handler._caller(self._token(token_use="id", email="someone@example.com"))
+
+    def test_an_id_token_on_a_route_is_answered_401_before_the_route_does_anything(self):
+        from shared.http_response import get_user_id, route_request
+
+        reached = []
+
+        def route(event, path, query, body):
+            reached.append(get_user_id(event))
+            return {"statusCode": 200, "headers": {}, "body": "{}"}
+        response = route_request({"routeKey": "GET /api/thing", "headers": {}, **self._token(token_use="id")},
+                                 {"GET /api/thing": route})
+        assert response["statusCode"] == 401 and reached == []
 
     @pytest.mark.parametrize("event", [
         {},

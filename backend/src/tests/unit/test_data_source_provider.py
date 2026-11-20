@@ -95,6 +95,32 @@ class TestAdminBestPractices:
         assert "Unknown operation" in _FakeProvider().handle({"operation": "get_admin_best_practices"})["error"]
 
 
+class TestAScanRequestIsTakenOnlyFromTheSchemaService:
+    """The bus rule delivers only the schema service's scan requests; the scanner checks the source again,
+    as the bus's other consumers do, so an event put on the bus by anything else scans nothing."""
+
+    @pytest.mark.parametrize("source", ["test.database-provider", "other-stack.schema-service", "evil", None])
+    def test_a_scan_request_from_anything_else_is_refused(self, monkeypatch, source):
+        from adam.data_source_provider import scanner_handler
+        from adam.shared import scan_events
+        monkeypatch.setenv("STACK_NAME", "test")
+        monkeypatch.setattr(scanner_handler, "_scan", lambda detail: pytest.fail("scanned"))
+        event = {"detail-type": scan_events.SCAN_REQUESTED, "detail": {"targetId": "t-1"},
+                 **({} if source is None else {"source": source})}
+        with pytest.raises(scanner_handler.ScanRefused):
+            scanner_handler.handler(event, None)
+
+    def test_one_from_the_schema_service_is_scanned(self, monkeypatch):
+        from adam.data_source_provider import scanner_handler
+        from adam.shared import scan_events
+        monkeypatch.setenv("STACK_NAME", "test")
+        scanned = []
+        monkeypatch.setattr(scanner_handler, "_scan", lambda detail: scanned.append(detail) or {"ok": True})
+        scanner_handler.handler({"source": scan_events.source("test", scan_events.SCHEMA_SERVICE),
+                                 "detail-type": scan_events.SCAN_REQUESTED, "detail": {"targetId": "t-1"}}, None)
+        assert scanned == [{"targetId": "t-1"}]
+
+
 class TestAListedCatalogIsNeverPartial:
 
     def test_the_catalog_statement_runs_through_execute_statement(self):

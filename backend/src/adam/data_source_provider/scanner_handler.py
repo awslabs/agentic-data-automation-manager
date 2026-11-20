@@ -32,7 +32,7 @@ import uuid
 import boto3
 import botocore.exceptions
 
-from adam.data_source_provider import engines
+from adam.data_source_provider import engines, login_attempts
 from adam.data_source_provider.secrets_manager_credential_provider import (
     SecretsManagerPasswordProvider,
 )
@@ -75,11 +75,14 @@ def _location(value) -> dict:
             **{k: value[k] for k in ("tls", "tlsCertificate") if k in value}}
 
 
-def _open(location: dict, secret_arn: object, *, discover_tls: bool = False):
+def _open(location: dict, secret_arn: object, *, discover_tls: bool = False, allow_plaintext: bool = False):
     """This engine's provider for the database at `location`, logged in as its scanner.
-    `discover_tls`: the probe that decides whether a database is reached over TLS."""
+    `discover_tls`: the probe that decides whether a database is reached over TLS; `allow_plaintext`:
+    an administrator confirmed a login without it."""
     engine = require_env("ENGINE")
     row = {"connectionId": f"scanner for {engine}", "engine": engine, **location, "discoverTls": discover_tls,
+           "allowPlaintext": allow_plaintext,
+           "allowPlaintext": allow_plaintext,
            "dsn": engines.build_dsn(engine, *(location[f] for f in LOCATION_FIELDS)),
            "secretName": _require_scanner_secret(secret_arn)}
     try:
@@ -109,14 +112,36 @@ def _failure(e: Exception) -> str:
 # ── Direct calls from the admin function ────────────────────────────────────
 
 def _probe(args: dict) -> dict:
-    provider = _open(_location(args.get("location")), args.get("scannerSecretArn"), discover_tls=True)
+    location = _location(args.get("location"))
+    allow_plaintext = args.get("allowPlaintext", False)
+    if not isinstance(allow_plaintext, bool):
+        raise ScanRefused("The request's allowPlaintext is not true or false.")
+    caller = args.get("caller")
+    if not (isinstance(caller, str) and caller.strip()):
+        raise ScanRefused("A login check names who asks for it: it counts against their limit on tried logins.")
+    # The limit the Connections page's checks count against too, before anything is dialed.
     try:
-        return provider.probe()
-    except RuntimeError as e:
-        # Only admins register targets, and they need the database's reason to fix the login.
-        raise ScanRefused(f"The scanner could not log in: {e}") from e
+        window = login_attempts.reserve(caller)
+    except login_attempts.TooManyFailures as e:
+        raise ScanRefused(str(e)) from None
+    refused = False
+    try:
+        # A location that records its transport (a saved version) is reached as recorded: only a new one is discovered.
+        provider = _open(location, args.get("scannerSecretArn"), discover_tls="tls" not in location,
+                         allow_plaintext=allow_plaintext)
+        try:
+            return provider.probe()
+        except RuntimeError as e:
+            refused = True
+            # Only admins register targets, and they need the database's reason to fix the login. Each try
+            # counts against their login limit first, which bounds its use as a port or password oracle.
+            raise ScanRefused(f"The scanner could not log in: {e}") from e
+        finally:
+            provider.close()
     finally:
-        provider.close()
+        # Only a login the database refused stays counted.
+        if not refused:
+            login_attempts.release(caller, window)
 
 
 def _store_login(args: dict) -> dict:
@@ -186,6 +211,10 @@ def _scan(detail: dict) -> None:
 def handler(event, context):
     event = event or {}
     if event.get("detail-type") == scan_events.SCAN_REQUESTED:
+        # The bus rule delivers only the schema service's; checked again, as the bus's other consumers do.
+        expected = scan_events.source(require_env("STACK_NAME"), scan_events.SCHEMA_SERVICE)
+        if event.get("source") != expected:
+            raise ScanRefused(f"Scan requests from {event.get('source')!r} are not taken; expected {expected!r}.")
         return _scan(event.get("detail") or {})
     operation = _OPERATIONS.get(event.get("operation", ""))
     if operation is None:

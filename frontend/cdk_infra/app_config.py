@@ -9,6 +9,11 @@ def stack_prefix(stage: str) -> str:
     return f"Adam{stage[:1].upper()}{stage[1:]}"
 
 
+def is_production(stage: str) -> bool:
+    """By the stacks a stage deploys, not its spelling: "Prod" deploys prod's, so it must not downgrade them."""
+    return stack_prefix(stage) == stack_prefix("prod")
+
+
 def connect_sources(outputs: dict[str, dict[str, str]], region: str) -> list[str]:
     """The origins the UI calls, from this stage's backend outputs: the content security policy
     allows these and nothing else."""

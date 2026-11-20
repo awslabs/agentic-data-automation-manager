@@ -68,11 +68,16 @@ def get_user_id(event: dict) -> str:
     shared with every other caller in the same state.
     """
     try:
-        sub = event["requestContext"]["authorizer"]["jwt"]["claims"]["sub"]
+        claims = event["requestContext"]["authorizer"]["jwt"]["claims"]
+        sub = claims["sub"]
     except (KeyError, TypeError):
         raise UnauthenticatedError(
             "Request carried no verified Cognito subject; sign in again."
         ) from None
+    # The authorizer accepts an ID token too, its audience being the web client: only an access token
+    # is an API credential, as the MCP Gateway and the Runtime require (cognito_identity_provider).
+    if claims.get("token_use") != "access":  # noqa: S105 - a claim value, not a password
+        raise UnauthenticatedError("Request carried a token that is not an access token; sign in again.")
     if not isinstance(sub, str) or not sub.strip():
         raise UnauthenticatedError("Request carried a subject that is not a user id.")
     return sub

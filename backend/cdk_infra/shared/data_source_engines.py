@@ -32,20 +32,20 @@ class EngineBuild:
 
 
 ENGINES: dict[str, EngineBuild] = {
-    "oracle": EngineBuild("Oracle", "Oracle", ("oracledb==26.0.1",), ("oracle_provider.py", "tls.py"), True,
+    "oracle": EngineBuild("Oracle", "Oracle", ("oracledb==26.1.0",), ("oracle_provider.py", "tls.py"), True,
                           "oracle_provider_function_name"),
     # scramp 1.5.0 dropped make_channel_binding, which pg8000 1.31.5 (the newest) calls on connect.
     "postgres": EngineBuild("PostgreSQL", "Postgres", ("pg8000==1.31.5", "scramp==1.4.17"),
                             ("postgresql_provider.py", "tls.py"), True, "postgresql_provider_function_name"),
-    "mysql": EngineBuild("MySQL", "MySQL", ("PyMySQL==1.2.3",), ("mysql_provider.py", "tls.py"), True,
+    "mysql": EngineBuild("MySQL", "MySQL", ("PyMySQL==1.2.4",), ("mysql_provider.py", "tls.py"), True,
                          "mysql_provider_function_name"),
-    "mariadb": EngineBuild("MariaDB", "MariaDB", ("PyMySQL==1.2.3",),
+    "mariadb": EngineBuild("MariaDB", "MariaDB", ("PyMySQL==1.2.4",),
                            ("mysql_provider.py", "mariadb_provider.py", "tls.py"), True,
                            "mariadb_provider_function_name"),
     # redshift_connector verifies the server against the CA bundle it ships. Of what it declares, only
     # scramp, packaging and boto3 are imported for a password login: requests (and with it certifi,
     # MPL-2.0), beautifulsoup4 and lxml serve only its SAML/Okta/ADFS/Azure sign-in plugins.
-    "redshift": EngineBuild("Redshift", "Redshift", ("scramp==1.4.17", "packaging==26.3", "boto3==1.43.103"),
+    "redshift": EngineBuild("Redshift", "Redshift", ("scramp==1.4.17", "packaging==26.3", "boto3==1.43.127"),
                             ("redshift_provider.py",), False, "redshift_provider_function_name",
                             driver_alone=("redshift_connector==2.2.0",)),
 }

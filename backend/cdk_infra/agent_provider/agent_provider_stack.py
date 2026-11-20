@@ -386,7 +386,8 @@ class AgentProviderStack(Stack):
                     "GATEWAY_URL": gateway.attr_gateway_url,
                     "SESSIONS_TABLE": sessions_table.table_name,
                     "APP_REGION": self.region,
-                    # The runtime verifies each caller's token itself, as the interceptor does.
+                    # The authorizer above verifies the signature (the VPC has no route to the
+                    # issuer's keys); the runtime checks the claims the interceptor checks.
                     "IDENTITY_PROVIDER": identity_provider,
                     "OIDC_ISSUER": oidc_issuer_url,
                     "ALLOWED_CLIENT_IDS": frontend_client_id,
@@ -396,6 +397,10 @@ class AgentProviderStack(Stack):
             )
 
         # ── AppSync Events API ───────────────────────────────────────────
+        # Its errors, in the log group AppSync names after the API. Never the events: they are users'
+        # answers, which AppSync logs only at DEBUG and ALL.
+        events_log_role = iam.Role(self, "EventsApiLogRole", assumed_by=iam.ServicePrincipal(
+            "appsync.amazonaws.com", conditions={"StringEquals": {"aws:SourceAccount": self.account}}))
         events_api = appsync.CfnApi(self, "EventsApi",
             name=f"{parent_stack_name}-events",
             event_config=appsync.CfnApi.EventConfigProperty(
@@ -409,7 +414,11 @@ class AgentProviderStack(Stack):
                 connection_auth_modes=[appsync.CfnApi.AuthModeProperty(auth_type="AMAZON_COGNITO_USER_POOLS")],
                 default_publish_auth_modes=[appsync.CfnApi.AuthModeProperty(auth_type="AWS_IAM")],
                 default_subscribe_auth_modes=[appsync.CfnApi.AuthModeProperty(auth_type="AMAZON_COGNITO_USER_POOLS")],
+                log_config=appsync.CfnApi.EventLogConfigProperty(
+                    cloud_watch_logs_role_arn=events_log_role.role_arn, log_level="ERROR"),
             ))
+        stage.log_group(self, "EventsApiLogs", name=f"/aws/appsync/apis/{events_api.attr_api_id}").grant_write(
+            events_log_role)
         # Channels are /agent/{user sub}/{session id}; the handler lets a caller
         # subscribe only under their own sub (see on_subscribe.js and its tests).
         appsync.CfnChannelNamespace(self, "AgentChannel",

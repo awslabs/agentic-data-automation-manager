@@ -9,7 +9,8 @@ import {
 import { notifications } from "@mantine/notifications";
 import { IconBan, IconPencil, IconPlus, IconRadar, IconVersions } from "@tabler/icons-react";
 import {
-  addScanTarget, addScanTargetVersion, disableScanTarget, errorText, SOURCE_ENGINES, SourceEngine, DEFAULT_ROW_CAP,
+  addScanTarget, addScanTargetVersion, CertificateConfirmation, CertificateToConfirm, PlaintextToConfirm, disableScanTarget, errorText,
+  SOURCE_ENGINES, SourceEngine, DEFAULT_ROW_CAP,
   DEFAULT_STATEMENT_TIMEOUT_SECONDS, getAdminBestPractices, listScanTargets, MAX_ROW_CAP, MAX_STATEMENT_TIMEOUT_SECONDS,
   RegisteredScanTarget, ScannerSecretInput, startScan, updateScanTarget,
 } from "../services/localApi";
@@ -220,6 +221,28 @@ export function AdminPage() {
       : {};
   };
 
+  // A database presenting a certificate no CA signed is trusted only once the user confirms its fingerprint
+  // (the server checks it against the certificate that save is presented), and one without TLS is logged in
+  // to only once the user confirms the login goes unencrypted. Each question is asked when the save meets it.
+  const confirmingCertificate = async <T,>(save: (confirmation: CertificateConfirmation) => Promise<T>): Promise<T> => {
+    let confirmation: CertificateConfirmation = {};
+    for (;;) {
+      try {
+        return await save(confirmation);
+      } catch (err) {
+        if (err instanceof CertificateToConfirm && confirmation.tlsFingerprint !== err.fingerprint
+            && window.confirm(`${err.message}\n\nTrust this certificate and save?`)) {
+          confirmation = { ...confirmation, tlsFingerprint: err.fingerprint };
+        } else if (err instanceof PlaintextToConfirm && !confirmation.confirmPlaintext
+            && window.confirm(`${err.message}\n\nSave without TLS?`)) {
+          confirmation = { ...confirmation, confirmPlaintext: true };
+        } else {
+          throw err;
+        }
+      }
+    }
+  };
+
   const saveTitles: Record<FormMode, [string, string]> = {
     register: ["Database registered", "Could not register the database"],
     edit: ["Settings saved", "Could not save the settings"],
@@ -236,10 +259,11 @@ export function AdminPage() {
         ...(trimmedName ? { name: trimmedName } : {}), schedule: scheduleValue, ...limits, ...secretInput(),
       })
       : mode === "version" && editing
-        ? await addScanTargetVersion(editing.targetId, { ...location, schedule: scheduleValue, ...secretInput() })
-        : await addScanTarget({
-          name: trimmedName, engine, ...location, schedule: scheduleValue, ...limits, ...secretInput(),
-        });
+        ? await confirmingCertificate((confirmation) => addScanTargetVersion(editing.targetId,
+          { ...location, schedule: scheduleValue, ...secretInput(), ...confirmation }))
+        : await confirmingCertificate((confirmation) => addScanTarget({
+          name: trimmedName, engine, ...location, schedule: scheduleValue, ...limits, ...secretInput(), ...confirmation,
+        }));
     notifications.show({
       title: saveTitles[mode][0], color: "green",
       message: `${saved.identity} (version ${saved.version})`

@@ -42,7 +42,7 @@ STORED = {"targetId", "secretName"}
 
 
 def _event(user):
-    return {"requestContext": {"authorizer": {"jwt": {"claims": {"sub": user}}}}}
+    return {"requestContext": {"authorizer": {"jwt": {"claims": {"sub": user, "token_use": "access"}}}}}
 
 
 def _body(response):
@@ -52,24 +52,6 @@ def _body(response):
 def _register(target_id, name, engine, host, port, database):
     """A scan target as the admin routes write one: named, so users may connect to it."""
     register_database(engine, host=host, port=port, database=database, target_id=target_id, name=name)
-
-
-@pytest.fixture
-def login_attempts_table(local_aws, monkeypatch):
-    """The provider service's table of refused typed logins, as the stack declares it."""
-    import uuid
-    ddb = boto3.client("dynamodb")
-    table = f"login-attempts-{uuid.uuid4().hex[:8]}"
-    ddb.create_table(TableName=table, BillingMode="PAY_PER_REQUEST",
-                     AttributeDefinitions=[{"AttributeName": "userId", "AttributeType": "S"},
-                                           {"AttributeName": "window", "AttributeType": "N"}],
-                     KeySchema=[{"AttributeName": "userId", "KeyType": "HASH"},
-                                {"AttributeName": "window", "KeyType": "RANGE"}])
-    monkeypatch.setenv("LOGIN_ATTEMPTS_TABLE_NAME", table)
-    try:
-        yield table
-    finally:
-        ddb.delete_table(TableName=table)
 
 
 @pytest.fixture
@@ -602,6 +584,56 @@ class TestGuessingPasswordsIsBounded:
             self._test(ALICE, postgres, WRONG_PASSWORD)
         assert "error" in _body(connections._test_connection(_event(ALICE), {}, {}, _pg_body(postgres)))
         monkeypatch.setattr(login_attempts, "_now", lambda: start + login_attempts.WINDOW_SECONDS)
+        assert self._test(ALICE, postgres, postgres.owner_password)["success"] is True
+
+    def test_checks_that_overlap_reach_the_database_at_most_the_limit(self, api, postgres, monkeypatch):
+        """Checks sent together: each is counted before its database is asked, so while the first
+        MAX_FAILURES are still waiting on it, the next is refused without reaching it."""
+        from adam.data_source_provider import login_attempts
+        sent, answers, real = [], [], provider_client._lambda_client
+
+        class _Overlapping:
+            # Each probe, before it reaches the database, starts the next check: none has finished.
+            def invoke(self, **kwargs):
+                if json.loads(kwargs["Payload"]).get("operation") == "probe":
+                    sent.append(kwargs["FunctionName"])
+                    if len(sent) < login_attempts.MAX_FAILURES + 5:
+                        answers.append(connections._test_connection(
+                            _event(ALICE), {}, {}, _pg_body(postgres, password=WRONG_PASSWORD)))
+                return real.invoke(**kwargs)
+        monkeypatch.setattr(provider_client, "_lambda_client", _Overlapping())
+        self._test(ALICE, postgres, WRONG_PASSWORD)
+        assert len(sent) == login_attempts.MAX_FAILURES
+        refused = [a for a in answers if a["statusCode"] == 400]
+        assert len(refused) == 1 and "Too many logins were refused" in _body(refused[0])["error"]
+
+    def test_a_login_accepted_after_its_window_ends_gives_the_next_window_no_extra_tries(
+            self, api, postgres, monkeypatch):
+        from adam.data_source_provider import login_attempts
+        last_second = 1_800_000_000 + login_attempts.WINDOW_SECONDS - 1
+        monkeypatch.setattr(login_attempts, "_now", lambda: last_second)
+        real = provider_client._lambda_client
+
+        class _AnswersInTheNextWindow:
+            def invoke(self, **kwargs):
+                if json.loads(kwargs["Payload"]).get("operation") == "probe":
+                    monkeypatch.setattr(login_attempts, "_now", lambda: last_second + 1)
+                return real.invoke(**kwargs)
+        monkeypatch.setattr(provider_client, "_lambda_client", _AnswersInTheNextWindow())
+        assert self._test(ALICE, postgres, postgres.owner_password)["success"] is True
+        monkeypatch.setattr(provider_client, "_lambda_client", real)
+        for _ in range(login_attempts.MAX_FAILURES):
+            assert self._test(ALICE, postgres, WRONG_PASSWORD)["success"] is False
+        refused = connections._test_connection(_event(ALICE), {}, {}, _pg_body(postgres))
+        assert "Too many logins were refused" in _body(refused)["error"]
+
+    def test_a_check_refused_before_the_database_is_asked_is_not_counted(self, api, postgres):
+        from adam.data_source_provider import login_attempts
+        _register("db-bad", "Bad", "postgres", "169.254.169.254", "5432", "d")
+        for _ in range(login_attempts.MAX_FAILURES + 1):
+            refused = connections._test_connection(_event(ALICE), {}, {}, {
+                "databaseId": "db-bad", "username": "u", "password": "p"})
+            assert _body(refused)["error"] == "'169.254.169.254' is not an address a database can be registered at."
         assert self._test(ALICE, postgres, postgres.owner_password)["success"] is True
 
     def test_each_refused_login_is_logged_with_its_user(self, api, postgres, caplog):

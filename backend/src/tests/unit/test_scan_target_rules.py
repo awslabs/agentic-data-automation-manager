@@ -145,12 +145,13 @@ class TestSubjects:
 
     def test_an_ordinary_subject_is_unchanged(self):
         sub = "0b6f1f0e-3c1a-4c55-9a39-1f0a3c1d2e4f"
-        assert get_user_id({"requestContext": {"authorizer": {"jwt": {"claims": {"sub": sub}}}}}) == sub
+        assert get_user_id({"requestContext": {"authorizer": {"jwt": {"claims": {"sub": sub, "token_use": "access"}}}}}) == sub
 
     @pytest.mark.parametrize("claims", [{}, {"sub": ""}, {"sub": "  "}, {"sub": 5}])
     def test_no_usable_subject_is_refused(self, claims):
         with pytest.raises(UnauthenticatedError):
-            get_user_id({"requestContext": {"authorizer": {"jwt": {"claims": claims}}}})
+            # An access token, so the subject alone is what is refused.
+            get_user_id({"requestContext": {"authorizer": {"jwt": {"claims": {"token_use": "access", **claims}}}}})
 
 
 class TestScheduleNames:
